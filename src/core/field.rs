@@ -1,4 +1,5 @@
 use crate::core::types::CardId;
+use crate::core::enums::Location;
 
 /// Field stores lists of CardId for each player (0/1) and fixed-size zones.
 pub struct Field {
@@ -23,12 +24,131 @@ impl Field {
             szone: [[None; 8], [None; 8]],
         }
     }
+
+    /// Add a card to the specified player/location/sequence.
+    /// For stacks (deck/hand/grave/remove/extra) we append to the vector.
+    /// For zones (mzone/szone) we place at the given sequence (index) and overwrite.
+    pub fn add_card(&mut self, player: u8, location: Location, card: CardId, sequence: u8) {
+        let p = player as usize;
+        if location.contains(Location::DECK) {
+            self.deck[p].push(card);
+        } else if location.contains(Location::HAND) {
+            self.hand[p].push(card);
+        } else if location.contains(Location::GRAVE) {
+            self.grave[p].push(card);
+        } else if location.contains(Location::REMOVED) {
+            self.remove[p].push(card);
+        } else if location.contains(Location::EXTRA) {
+            self.extra[p].push(card);
+        } else if location.contains(Location::MZONE) {
+            let idx = sequence as usize;
+            if idx < self.mzone[p].len() {
+                self.mzone[p][idx] = Some(card);
+            } else {
+                // ignore out-of-range placements silently for now
+            }
+        } else if location.contains(Location::SZONE) {
+            let idx = sequence as usize;
+            if idx < self.szone[p].len() {
+                self.szone[p][idx] = Some(card);
+            } else {
+                // ignore out-of-range placements silently for now
+            }
+        }
+    }
+
+    /// Remove a card for a given player and location by sequence / index.
+    /// For zones (mzone/szone) this takes the value at the sequence and returns it.
+    /// For stacks (deck/hand/grave/remove/extra) this removes the card at the given sequence index if present.
+    /// Returns Some(CardId) if found and removed, else None.
+    pub fn remove_card(&mut self, player: u8, location: Location, sequence: u8) -> Option<CardId> {
+        let p = player as usize;
+        if location.contains(Location::DECK) {
+            let idx = sequence as usize;
+            if idx < self.deck[p].len() {
+                return Some(self.deck[p].remove(idx));
+            }
+            return None;
+        } else if location.contains(Location::HAND) {
+            let idx = sequence as usize;
+            if idx < self.hand[p].len() {
+                return Some(self.hand[p].remove(idx));
+            }
+            return None;
+        } else if location.contains(Location::GRAVE) {
+            let idx = sequence as usize;
+            if idx < self.grave[p].len() {
+                return Some(self.grave[p].remove(idx));
+            }
+            return None;
+        } else if location.contains(Location::REMOVED) {
+            let idx = sequence as usize;
+            if idx < self.remove[p].len() {
+                return Some(self.remove[p].remove(idx));
+            }
+            return None;
+        } else if location.contains(Location::EXTRA) {
+            let idx = sequence as usize;
+            if idx < self.extra[p].len() {
+                return Some(self.extra[p].remove(idx));
+            }
+            return None;
+        } else if location.contains(Location::MZONE) {
+            // remove if occupies the zone
+            let idx = sequence as usize;
+            if idx < self.mzone[p].len() {
+                return self.mzone[p][idx].take();
+            }
+            return None;
+        } else if location.contains(Location::SZONE) {
+            let idx = sequence as usize;
+            if idx < self.szone[p].len() {
+                return self.szone[p][idx].take();
+            }
+            return None;
+        }
+        None
+    }
+
+    /// Remove a card from a stacked location (DECK/HAND/GRAVE/REMOVED/EXTRA) by CardId.
+    /// This searches for the matching CardId and removes it from the Vec, returning the CardId if found.
+    pub fn remove_card_from_stack(&mut self, player: u8, location: Location, card: CardId) -> Option<CardId> {
+        let p = player as usize;
+        if location.contains(Location::DECK) {
+            if let Some(idx) = self.deck[p].iter().position(|&c| c == card) {
+                return Some(self.deck[p].remove(idx));
+            }
+            return None;
+        } else if location.contains(Location::HAND) {
+            if let Some(idx) = self.hand[p].iter().position(|&c| c == card) {
+                return Some(self.hand[p].remove(idx));
+            }
+            return None;
+        } else if location.contains(Location::GRAVE) {
+            if let Some(idx) = self.grave[p].iter().position(|&c| c == card) {
+                return Some(self.grave[p].remove(idx));
+            }
+            return None;
+        } else if location.contains(Location::REMOVED) {
+            if let Some(idx) = self.remove[p].iter().position(|&c| c == card) {
+                return Some(self.remove[p].remove(idx));
+            }
+            return None;
+        } else if location.contains(Location::EXTRA) {
+            if let Some(idx) = self.extra[p].iter().position(|&c| c == card) {
+                return Some(self.extra[p].remove(idx));
+            }
+            return None;
+        }
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::types::CardId;
+    use crate::core::enums::Location;
 
     #[test]
     fn field_new_empty() {
@@ -41,5 +161,29 @@ mod tests {
         let mut f2 = f;
         f2.deck[0].push(CardId::new(1));
         assert_eq!(f2.deck[0].len(), 1);
+    }
+
+    #[test]
+    fn add_and_remove_deck() {
+        let mut f = Field::new();
+        let id = CardId::new(42);
+        f.add_card(0, Location::DECK, id, 0);
+        assert_eq!(f.deck[0].len(), 1);
+        assert_eq!(f.deck[0][0], id);
+        let r = f.remove_card_from_stack(0, Location::DECK, id).expect("should remove");
+        assert_eq!(r, id);
+        assert_eq!(f.deck[0].len(), 0);
+    }
+
+    #[test]
+    fn add_and_remove_mzone() {
+        let mut f = Field::new();
+        let id = CardId::new(3);
+        f.add_card(1, Location::MZONE, id, 0);
+        assert!(f.mzone[1][0].is_some());
+        assert_eq!(f.mzone[1][0].unwrap(), id);
+        let r = f.remove_card(1, Location::MZONE, 0).expect("removed");
+        assert_eq!(r, id);
+        assert!(f.mzone[1][0].is_none());
     }
 }
