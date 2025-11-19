@@ -1,0 +1,8 @@
+[package]
+name = "osiris"
+version = "0.1.0"
+edition = "2021"
+default-run = "osiris"
+
+[dependencies]
+bitflags = "2.6"
