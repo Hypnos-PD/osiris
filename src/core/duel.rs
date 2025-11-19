@@ -5,6 +5,7 @@ use crate::core::mtrandom::Mt19937;
 use crate::core::chain::Chain;
 use crate::core::scripting::{FileSystemLoader, ScriptLoader};
 use crate::core::group::Group;
+use crate::core::effect::Effect;
 // import Effect type (may be used for future processor logic)
 use crate::core::types::CardId;
 use mlua::Lua;
@@ -26,14 +27,38 @@ impl Duel {
     pub fn new(seed: u32) -> Self {
         let lua = Lua::new();
         
-        // Register Group table in Lua globals
+        // Register global tables in Lua
         {
             let globals = lua.globals();
+            
+            // Register Group table
             let group_table = lua.create_table().expect("Failed to create Group table");
             group_table.set("CreateGroup", lua.create_function(|_, ()| {
                 Ok(Group::new())
             }).expect("Failed to create CreateGroup function")).expect("Failed to set CreateGroup");
             globals.set("Group", group_table).expect("Failed to set Group table");
+            
+            // Register Effect table
+            let effect_table = lua.create_table().expect("Failed to create Effect table");
+            effect_table.set("CreateEffect", lua.create_function(|_, card: Option<CardId>| {
+                Ok(Effect::create_effect(card))
+            }).expect("Failed to create CreateEffect function")).expect("Failed to set CreateEffect");
+            globals.set("Effect", effect_table).expect("Failed to set Effect table");
+            
+            // Register Duel table with methods
+            let duel_table = lua.create_table().expect("Failed to create Duel table");
+            duel_table.set("RegisterEffect", lua.create_function(|_, (_effect, _player): (mlua::AnyUserData, u32)| {
+                // Stub - register effect
+                Ok(())
+            }).expect("Failed to create RegisterEffect function")).expect("Failed to set RegisterEffect");
+            
+            duel_table.set("LoadScript", lua.create_function(|_lua, _name: String| {
+                // Stub - load script by name
+                // In reality, this would load from the script directory
+                Ok(())
+            }).expect("Failed to create LoadScript function")).expect("Failed to set LoadScript");
+            
+            globals.set("Duel", duel_table).expect("Failed to set Duel table");
         }
         
         let mut duel = Duel { 
@@ -50,7 +75,7 @@ impl Duel {
         duel
     }
 
-    /// Load core Lua scripts (constant.lua and utility.lua) from the external YGOPro script directory.
+    /// Load core Lua scripts (constant.lua, utility.lua, and procedure.lua) from the external YGOPro script directory.
     pub fn load_core_scripts(&mut self) -> mlua::Result<()> {
         let loader = FileSystemLoader::new(PathBuf::from("../external/ygopro/script"));
         
@@ -63,6 +88,11 @@ impl Duel {
         let utility_script = loader.load_script("utility.lua")
             .ok_or(mlua::Error::RuntimeError("Failed to load utility.lua".to_string()))?;
         self.lua.load(&utility_script).exec()?;
+        
+        // Load procedure.lua - now that Effect and Card are available
+        let procedure_script = loader.load_script("procedure.lua")
+            .ok_or(mlua::Error::RuntimeError("Failed to load procedure.lua".to_string()))?;
+        self.lua.load(&procedure_script).exec()?;
         
         Ok(())
     }
@@ -407,5 +437,33 @@ mod tests {
         assert!(result.is_ok(), "Group len meta method should work");
         let len = result.unwrap();
         assert_eq!(len, 0, "New group should have length 0");
+    }
+
+    #[test]
+    fn test_lua_effect_creation() {
+        let duel = Duel::new(42);
+        
+        // Test Effect creation
+        let result: mlua::Result<mlua::AnyUserData> = duel.lua.load(r#"
+            local e = Effect.CreateEffect(nil)
+            return e
+        "#).eval();
+        
+        assert!(result.is_ok(), "Effect creation should work");
+        let effect = result.unwrap();
+        assert!(effect.is::<Effect>(), "Created object should be an Effect");
+    }
+
+    #[test]
+    fn test_lua_procedure_script_loaded() {
+        let duel = Duel::new(42);
+        
+        // Test that procedure.lua is loaded by checking for the Auxiliary table it defines
+        // procedure.lua should define various helper functions in the Auxiliary table
+        let result: mlua::Result<mlua::Table> = duel.lua.globals().get("Auxiliary");
+        
+        // Auxiliary is a table defined in procedure.lua
+        // If it exists, procedure.lua loaded successfully
+        assert!(result.is_ok(), "procedure.lua should be loaded and define Auxiliary table");
     }
 }

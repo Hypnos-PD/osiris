@@ -1,4 +1,6 @@
 use crate::core::enums::*;
+use mlua::{UserData, UserDataMethods};
+use crate::core::types::CardId;
 
 /// StatBlock stores a card's original/current mutable attributes
 // Keep traits minimal to avoid relying on derived traits from bitflags
@@ -78,6 +80,35 @@ impl Card {
     /// Test whether the card has at least one of the `status` bits set.
     pub fn has_status(&self, status: CardStatus) -> bool {
         self.status.intersects(status)
+    }
+}
+
+impl UserData for CardId {
+    fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
+        // Method: c:RegisterEffect(e) - stub for now
+        methods.add_method_mut("RegisterEffect", |_, _self, _effect: mlua::AnyUserData| {
+            // Stub - register effect on card
+            Ok(())
+        });
+        
+        // Method: c:GetCode() - returns card code
+        methods.add_method("GetCode", |_, self_, ()| {
+            // For now, return the CardId value as code
+            // In reality, we'd need to look up the actual card code from the duel
+            Ok(self_.0)
+        });
+        
+        // Method: c:GetControler() - returns controller
+        methods.add_method("GetControler", |_, _self, ()| {
+            // Stub - return 0 for now
+            Ok(0)
+        });
+        
+        // Method: c:GetLocation() - returns location
+        methods.add_method("GetLocation", |_, _self, ()| {
+            // Stub - return 0 for now
+            Ok(0)
+        });
     }
 }
 
