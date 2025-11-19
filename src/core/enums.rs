@@ -2,6 +2,7 @@ use bitflags::bitflags;
 
 // Card type flags (TYPE_* in C++)
 bitflags! {
+    #[derive(Clone)]
     pub struct CardType: u32 {
         const MONSTER = 0x1; // TYPE_MONSTER
         const SPELL = 0x2; // TYPE_SPELL
@@ -33,6 +34,7 @@ bitflags! {
 
 // Card attribute flags (ATTRIBUTE_* in C++)
 bitflags! {
+    #[derive(Clone)]
     pub struct CardAttribute: u32 {
         const EARTH = 0x1; // ATTRIBUTE_EARTH
         const WATER = 0x2; // ATTRIBUTE_WATER
@@ -46,6 +48,7 @@ bitflags! {
 
 // Card race flags (RACE_* in C++)
 bitflags! {
+    #[derive(Clone)]
     pub struct CardRace: u32 {
         const WARRIOR = 0x1; // RACE_WARRIOR
         const SPELLCASTER = 0x2; // RACE_SPELLCASTER
@@ -78,6 +81,7 @@ bitflags! {
 
 // Card position flags (POS_* in C++)
 bitflags! {
+    #[derive(Clone)]
     pub struct CardPosition: u32 {
         const FACEUP_ATTACK = 0x1; // POS_FACEUP_ATTACK
         const FACEDOWN_ATTACK = 0x2; // POS_FACEDOWN_ATTACK
@@ -93,6 +97,7 @@ bitflags! {
 
 // Location flags (LOCATION_* in C++)
 bitflags! {
+    #[derive(Clone)]
     pub struct Location: u32 {
         const DECK = 0x1; // LOCATION_DECK
         const HAND = 0x2; // LOCATION_HAND
@@ -128,6 +133,7 @@ bitflags! {
 
 // Card Status flags (STATUS_* in C++)
 bitflags! {
+    #[derive(Clone)]
     pub struct CardStatus: u32 {
         const DISABLED = 0x1; // STATUS_DISABLED
         const TO_ENABLE = 0x2; // STATUS_TO_ENABLE

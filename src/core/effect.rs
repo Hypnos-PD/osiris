@@ -8,12 +8,14 @@ pub struct Effect {
     pub owner: CardId,
     pub description: u32,
     pub code: u32,
+    pub type_: u32,
+    pub range: u32,
     pub flag: u32,
 }
 
 impl Effect {
-    pub fn new(id: u32, owner: CardId, description: u32, code: u32, flag: u32) -> Self {
-        Effect { id, owner, description, code, flag }
+    pub fn new(id: u32, owner: CardId, description: u32, code: u32, type_: u32, range: u32, flag: u32) -> Self {
+        Effect { id, owner, description, code, type_, range, flag }
     }
 
     /// Create a new effect (static constructor for Lua)
@@ -23,6 +25,8 @@ impl Effect {
             owner: CardId::new(0),
             description: 0,
             code: 0,
+            type_: 0,
+            range: 0,
             flag: 0,
         }
     }
@@ -41,13 +45,13 @@ impl UserData for Effect {
             Ok(())
         });
         
-        methods.add_method_mut("SetRange", |_, _self, _range: u32| {
-            // Stub - store range somewhere if needed
+        methods.add_method_mut("SetRange", |_, self_, range: u32| {
+            self_.range = range;
             Ok(())
         });
         
-        methods.add_method_mut("SetType", |_, _self, _effect_type: u32| {
-            // Stub - store type somewhere if needed
+        methods.add_method_mut("SetType", |_, self_, effect_type: u32| {
+            self_.type_ = effect_type;
             Ok(())
         });
         
@@ -90,7 +94,7 @@ mod tests {
 
     #[test]
     fn effect_constructs() {
-        let e = Effect::new(1, CardId::new(0), 10, 100, 0);
+        let e = Effect::new(1, CardId::new(0), 10, 100, 0, 0, 0);
         assert_eq!(e.id, 1);
         assert_eq!(e.owner, CardId::new(0));
     }

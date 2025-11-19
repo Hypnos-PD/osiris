@@ -142,6 +142,17 @@ impl Field {
         }
         None
     }
+
+    /// Find the first empty monster zone slot for a player
+    pub fn find_empty_mzone_slot(&self, player: u8) -> Option<u8> {
+        let p = player as usize;
+        for (index, slot) in self.mzone[p].iter().enumerate() {
+            if slot.is_none() {
+                return Some(index as u8);
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -185,5 +196,28 @@ mod tests {
         let r = f.remove_card(1, Location::MZONE, 0).expect("removed");
         assert_eq!(r, id);
         assert!(f.mzone[1][0].is_none());
+    }
+
+    #[test]
+    fn find_empty_mzone_slot_works() {
+        let mut f = Field::new();
+        
+        // Test empty field
+        assert_eq!(f.find_empty_mzone_slot(0), Some(0));
+        assert_eq!(f.find_empty_mzone_slot(1), Some(0));
+        
+        // Fill some slots
+        f.mzone[0][0] = Some(CardId::new(1));
+        f.mzone[0][1] = Some(CardId::new(2));
+        
+        assert_eq!(f.find_empty_mzone_slot(0), Some(2));
+        assert_eq!(f.find_empty_mzone_slot(1), Some(0));
+        
+        // Fill all slots
+        for i in 0..7 {
+            f.mzone[0][i] = Some(CardId::new(i as u32 + 10));
+        }
+        
+        assert_eq!(f.find_empty_mzone_slot(0), None);
     }
 }

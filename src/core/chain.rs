@@ -25,8 +25,8 @@ mod tests {
     #[test]
     fn chain_add_and_resolve() {
         let mut c = Chain::new();
-        let e1 = Effect::new(1, CardId::new(0), 1, 0, 0);
-        let e2 = Effect::new(2, CardId::new(1), 2, 0, 0);
+        let e1 = Effect::new(1, CardId::new(0), 1, 0, 0, 0, 0);
+        let e2 = Effect::new(2, CardId::new(1), 2, 0, 0, 0, 0);
         c.add_effect(e1);
         c.add_effect(e2);
         let r = c.resolve().expect("effect");

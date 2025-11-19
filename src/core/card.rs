@@ -1,9 +1,11 @@
 use crate::core::enums::*;
 use mlua::{UserData, UserDataMethods};
-use crate::core::types::CardId;
+use crate::core::types::{CardId, EffectId};
+use std::sync::{Arc, Mutex};
 
 /// StatBlock stores a card's original/current mutable attributes
 // Keep traits minimal to avoid relying on derived traits from bitflags
+#[derive(Clone)]
 pub struct StatBlock {
     pub type_: CardType,
     pub level: u32,
@@ -27,6 +29,7 @@ impl Default for StatBlock {
 
 /// Card structure for osiris core. Does not hold references to other cards or duel.
 // Keep derives minimal for the same reason as StatBlock
+#[derive(Clone)]
 pub struct Card {
     // Identity
     pub code: u32,
@@ -47,6 +50,8 @@ pub struct Card {
     // Flags
     // Placeholder for now; we can implement CardStatus as bitflags later.
     pub status: CardStatus,
+    // Associated effects
+    pub effects: Vec<EffectId>,
 }
 
 impl Card {
@@ -64,6 +69,7 @@ impl Card {
             controller: 0,
             reason: 0,
             status: CardStatus::empty(),
+            effects: vec![],
         }
     }
 
@@ -86,28 +92,58 @@ impl Card {
 impl UserData for CardId {
     fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
         // Method: c:RegisterEffect(e) - stub for now
-        methods.add_method_mut("RegisterEffect", |_, _self, _effect: mlua::AnyUserData| {
-            // Stub - register effect on card
+        methods.add_method_mut("RegisterEffect", |lua, self_, effect_ud: mlua::AnyUserData| {
+            // Register the effect in the DuelData arena and attach to this card
+            let data = lua.app_data_ref::<Arc<Mutex<crate::core::duel::DuelData>>>()
+                .expect("DuelData not found in Lua app data");
+            let mut data_guard = data.lock().unwrap();
+            // Copy effect data from userdata and move into arena
+            if let Ok(e) = effect_ud.borrow::<crate::core::effect::Effect>() {
+                let _eid = data_guard.register_effect(e.clone(), Some(*self_));
+            }
             Ok(())
         });
         
         // Method: c:GetCode() - returns card code
-        methods.add_method("GetCode", |_, self_, ()| {
-            // For now, return the CardId value as code
-            // In reality, we'd need to look up the actual card code from the duel
-            Ok(self_.0)
+        methods.add_method("GetCode", |lua, self_, ()| {
+            // Get the actual card code from the duel data
+            let data = lua.app_data_ref::<Arc<Mutex<crate::core::duel::DuelData>>>()
+                .expect("DuelData not found in Lua app data");
+            let data_guard = data.lock().unwrap();
+            
+            if let Some(card) = data_guard.get_card(*self_) {
+                Ok(card.code)
+            } else {
+                Ok(0) // Return 0 if card not found
+            }
         });
         
         // Method: c:GetControler() - returns controller
-        methods.add_method("GetControler", |_, _self, ()| {
-            // Stub - return 0 for now
-            Ok(0)
+        methods.add_method("GetControler", |lua, self_, ()| {
+            // Get the actual controller from the duel data
+            let data = lua.app_data_ref::<Arc<Mutex<crate::core::duel::DuelData>>>()
+                .expect("DuelData not found in Lua app data");
+            let data_guard = data.lock().unwrap();
+            
+            if let Some(card) = data_guard.get_card(*self_) {
+                Ok(card.controller as u32)
+            } else {
+                Ok(0) // Return 0 if card not found
+            }
         });
         
         // Method: c:GetLocation() - returns location
-        methods.add_method("GetLocation", |_, _self, ()| {
-            // Stub - return 0 for now
-            Ok(0)
+        methods.add_method("GetLocation", |lua, self_, ()| {
+            // Get the actual location from the duel data
+            let data = lua.app_data_ref::<Arc<Mutex<crate::core::duel::DuelData>>>()
+                .expect("DuelData not found in Lua app data");
+            let data_guard = data.lock().unwrap();
+            
+            if let Some(card) = data_guard.get_card(*self_) {
+                Ok(card.location.bits() as u32)
+            } else {
+                Ok(0) // Return 0 if card not found
+            }
         });
     }
 }
