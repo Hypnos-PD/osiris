@@ -389,5 +389,15 @@ mod tests {
             assert!(!r.players.is_empty(), "Players should have been parsed when decompressed_ok is true");
             assert!(r.decks.len() >= 1, "Decks should have been parsed when decompressed_ok is true");
         }
+
+        // parse first N packets and print their types
+        use crate::core::messages::{parse_packet, MsgType};
+        let n = 20usize;
+        let mut seen: Vec<MsgType> = Vec::new();
+        for pkt in r.packet_data.iter().take(n) {
+            let (msg, _payload) = parse_packet(pkt);
+            println!("Packet msg: {:?}", msg);
+            seen.push(msg);
+        }
     }
 }
