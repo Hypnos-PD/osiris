@@ -60,6 +60,7 @@ pub struct Replay {
     pub decks: Vec<DeckArray>,
     pub script_name: Option<String>,
     pub data: Vec<u8>, // decompressed or raw datastream
+    pub actions: Vec<u8>,
 }
 
 impl Replay {
@@ -97,8 +98,13 @@ impl Replay {
 
         let mut data: Vec<u8> = Vec::new();
         if (base.flag & REPLAY_COMPRESSED) != 0 {
-            // decompress: C++ used LzmaUncompress with base.props 5
-            let mut reader = std::io::Cursor::new(comp_buf);
+            // decompress: C++ used LzmaUncompress with base.props size 5 and comp_data doesn't include props
+            // We must prefix props to the compressed stream to be compatible with lzma-rs which expects props first
+            let props_len = 5usize;
+            let mut composed: Vec<u8> = Vec::with_capacity(props_len + comp_buf.len());
+            composed.extend_from_slice(&base.props[..props_len]);
+            composed.extend_from_slice(&comp_buf[..]);
+            let mut reader = std::io::Cursor::new(composed);
             lzma_decompress(&mut reader, &mut data).map_err(|e| format!("lzma decompress: {}", e))?;
             if data.len() != base.datasize as usize {
                 return Err(format!("decompressed size mismatch expected {} got {}", base.datasize, data.len()));
@@ -179,7 +185,11 @@ impl Replay {
             }
         }
 
-        Ok(Replay { header: base, players, params, decks, script_name, data })
+        // Remaining bytes are considered the action stream; capture them
+        let mut actions: Vec<u8> = Vec::new();
+        cursor.read_to_end(&mut actions).map_err(|e| format!("read action bytes: {}", e))?;
+
+        Ok(Replay { header: base, players, params, decks, script_name, data, actions })
     }
 }
 
@@ -246,5 +256,21 @@ mod tests {
         assert_eq!(r.params.start_lp, 8000);
         assert_eq!(r.decks.len(), 2);
         assert_eq!(r.decks[0].main[0], 12345);
+    }
+
+    #[test]
+    fn test_real_replay_parsing() {
+        use std::path::Path;
+        let p = Path::new("../../test/replay/2025-04-28 17-58-47.yrp");
+        if !p.exists() {
+            println!("Skipping real replay test, file not found: {}", p.display());
+            return;
+        }
+        let r = match Replay::open(p) {
+            Ok(x) => x,
+            Err(e) => panic!("Replay::open failed: {}", e),
+        };
+        println!("seed: {} version: {} players: {:?}", r.header.seed, r.header.version, r.players);
+        assert!(r.actions.len() > 0, "Replay actions is empty; decompression may have failed.");
     }
 }
