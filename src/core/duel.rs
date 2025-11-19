@@ -2,6 +2,8 @@ use crate::core::card::Card;
 use crate::core::enums::Location;
 use crate::core::field::Field;
 use crate::core::mtrandom::Mt19937;
+use crate::core::chain::Chain;
+// import Effect type (may be used for future processor logic)
 use crate::core::types::CardId;
 
 /// Duel acts as the arena holding cards and the field.
@@ -9,11 +11,76 @@ pub struct Duel {
     pub cards: Vec<Card>,
     pub field: Field,
     pub random: Mt19937,
+    pub chain: Chain,
+    pub state: ProcessorState,
+    pub turn: u32,
+    pub turn_player: u8,
 }
 
 impl Duel {
     pub fn new(seed: u32) -> Self {
-        Duel { cards: Vec::new(), field: Field::new(), random: Mt19937::new(seed) }
+        Duel { 
+            cards: Vec::new(), 
+            field: Field::new(), 
+            random: Mt19937::new(seed),
+            chain: Chain::new(),
+            state: ProcessorState::Start,
+            turn: 0,
+            turn_player: 0,
+        }
+    }
+
+}
+
+/// ProcessorState is the high-level step used by the duel processor loop.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ProcessorState {
+    Start,
+    TurnChange,
+    Draw,
+    Standby,
+    Main1,
+    Battle,
+    Main2,
+    End,
+    GameOver,
+}
+
+impl Duel {
+    /// Process the duel state machine for one cycle: returns true to continue, false to stop.
+    pub fn process(&mut self) -> bool {
+        match self.state {
+            ProcessorState::Start => {
+                println!("Duel Start");
+                // Shuffle and draw initial hands for both players
+                for p in 0..2u8 {
+                    self.shuffle_deck(p);
+                }
+                // Draw 5 for each player
+                for p in 0..2u8 {
+                    self.draw(p, 5);
+                }
+                self.state = ProcessorState::TurnChange;
+                true
+            }
+            ProcessorState::TurnChange => {
+                self.turn += 1;
+                self.turn_player = (self.turn_player + 1) % 2;
+                self.state = ProcessorState::Draw;
+                true
+            }
+            ProcessorState::Draw => {
+                self.draw(self.turn_player, 1);
+                self.state = ProcessorState::Main1;
+                true
+            }
+            ProcessorState::Main1 => {
+                println!("Main Phase 1");
+                // Stop processing until player inputs / network interaction
+                false
+            }
+            _ => false,
+        }
     }
 
     /// Create a card in the arena and return its CardId handle.
@@ -237,5 +304,27 @@ mod tests {
         d2.draw(0, 2);
         assert_eq!(d2.field.hand[0].len(), 2);
         assert_eq!(d2.field.deck[0].len(), 3);
+    }
+
+    #[test]
+    fn test_game_flow_stub() {
+        let mut d = Duel::new(1);
+        // create enough cards in player decks
+        for i in 0..10 {
+            d.create_card(100 + i, 0);
+            d.create_card(200 + i, 1);
+        }
+        // Ensure initial pointers
+        assert_eq!(d.state, ProcessorState::Start);
+        // Run the processor until it pauses
+        while d.process() {}
+        // After first full cycle, turn should be > 0
+        assert!(d.turn > 0);
+        // Confirm hand sizes: both initially 5 after Start, and turn player got +1 in Draw
+        let other_player = (d.turn_player + 1) % 2;
+        assert_eq!(d.field.hand[other_player as usize].len(), 5);
+        assert_eq!(d.field.hand[d.turn_player as usize].len(), 6);
+        // Ensure state is Main1 (processing paused)
+        assert_eq!(d.state, ProcessorState::Main1);
     }
 }
