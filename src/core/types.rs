@@ -1,3 +1,5 @@
+use mlua::{FromLua, Lua, Value};
+
 /// Core typed IDs and handles to avoid mixing up card database code with internal handle index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CardId(pub u32);
@@ -11,4 +13,18 @@ impl CardId {
 
 impl Default for CardId {
     fn default() -> Self { CardId(0) }
+}
+
+impl<'lua> FromLua<'lua> for CardId {
+    fn from_lua(value: Value<'lua>, _: &'lua Lua) -> mlua::Result<Self> {
+        match value {
+            Value::Integer(i) => Ok(CardId(i as u32)),
+            Value::Number(n) => Ok(CardId(n as u32)),
+            _ => Err(mlua::Error::FromLuaConversionError {
+                from: value.type_name(),
+                to: "CardId",
+                message: Some("Expected integer or number".to_string()),
+            }),
+        }
+    }
 }

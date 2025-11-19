@@ -4,6 +4,7 @@ use crate::core::field::Field;
 use crate::core::mtrandom::Mt19937;
 use crate::core::chain::Chain;
 use crate::core::scripting::{FileSystemLoader, ScriptLoader};
+use crate::core::group::Group;
 // import Effect type (may be used for future processor logic)
 use crate::core::types::CardId;
 use mlua::Lua;
@@ -24,6 +25,17 @@ pub struct Duel {
 impl Duel {
     pub fn new(seed: u32) -> Self {
         let lua = Lua::new();
+        
+        // Register Group table in Lua globals
+        {
+            let globals = lua.globals();
+            let group_table = lua.create_table().expect("Failed to create Group table");
+            group_table.set("CreateGroup", lua.create_function(|_, ()| {
+                Ok(Group::new())
+            }).expect("Failed to create CreateGroup function")).expect("Failed to set CreateGroup");
+            globals.set("Group", group_table).expect("Failed to set Group table");
+        }
+        
         let mut duel = Duel { 
             cards: Vec::new(), 
             field: Field::new(), 
@@ -47,11 +59,10 @@ impl Duel {
             .ok_or(mlua::Error::RuntimeError("Failed to load constant.lua".to_string()))?;
         self.lua.load(&constant_script).exec()?;
         
-        // Note: utility.lua requires additional dependencies that aren't available yet
-        // We'll load it later when we have the full Lua environment set up
-        // let utility_script = loader.load_script("utility.lua")
-        //     .ok_or(mlua::Error::RuntimeError("Failed to load utility.lua".to_string()))?;
-        // self.lua.load(&utility_script).exec()?;
+        // Load utility.lua - now that Group is available
+        let utility_script = loader.load_script("utility.lua")
+            .ok_or(mlua::Error::RuntimeError("Failed to load utility.lua".to_string()))?;
+        self.lua.load(&utility_script).exec()?;
         
         Ok(())
     }
@@ -371,5 +382,30 @@ mod tests {
         
         let location_deck = result.unwrap();
         assert_eq!(location_deck, 0x1, "LOCATION_DECK should equal 0x1");
+    }
+
+    #[test]
+    fn test_lua_group() {
+        let duel = Duel::new(42);
+        
+        // Test Group creation and basic functionality
+        let result: mlua::Result<u32> = duel.lua.load(r#"
+            local g = Group.CreateGroup()
+            return g:GetCount()
+        "#).eval();
+        
+        assert!(result.is_ok(), "Group creation and GetCount should work");
+        let count = result.unwrap();
+        assert_eq!(count, 0, "New group should have 0 cards");
+        
+        // Test the len meta method (#g)
+        let result: mlua::Result<u32> = duel.lua.load(r#"
+            local g = Group.CreateGroup()
+            return #g
+        "#).eval();
+        
+        assert!(result.is_ok(), "Group len meta method should work");
+        let len = result.unwrap();
+        assert_eq!(len, 0, "New group should have length 0");
     }
 }
