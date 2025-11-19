@@ -196,10 +196,10 @@ impl Duel {
         println!("Duel Start");
         // Initialize LP to defaults for a duel start in case not set by load_replay
         data.lp = [8000, 8000];
-        // NOTE: Disabled shuffle to match ocgcore no-shuffle behavior for comparison testing
-        // for p in 0..2u8 {
-        //     self.shuffle_deck_internal(&mut data, p);
-        // }
+        for p in 0..2u8 {
+            // Re-enable shuffle to match ocgcore behavior
+            self.shuffle_deck_internal(&mut data, p);
+        }
         for p in 0..2u8 {
             self.draw_internal(&mut data, p, 5);
         }
@@ -722,12 +722,20 @@ impl Duel {
     fn shuffle_deck_internal(&self, data: &mut DuelData, player: u8) {
         let p = player as usize;
         let deck = &mut data.field.deck[p];
-        if deck.len() <= 1 {
-            return;
-        }
-        for i in (1..deck.len()).rev() {
-            let j = (data.random.gen_u32() as usize) % (i + 1);
-            deck.swap(i, j);
+        let n = deck.len();
+        if n <= 1 { return; }
+        // Implement C++ ocgcore forward Fisher-Yates: for i in 0..n-1 { r = rand(i, n-1); swap(i, r); }
+        for i in 0..(n - 1) {
+            // range [i, n-1]
+            let range = (n - i) as u32; // inclusive count
+            // compute unbiased uniform random in [0, range-1] using rejection sampling
+            let mut x = data.random.gen_u32();
+            let bound = u32::MAX - (u32::MAX % range);
+            while x >= bound {
+                x = data.random.gen_u32();
+            }
+            let r = i + (x % range) as usize;
+            deck.swap(i, r);
         }
     }
 
