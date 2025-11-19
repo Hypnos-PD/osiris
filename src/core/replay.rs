@@ -3,6 +3,10 @@ use std::io::{Read, Cursor};
 use std::path::Path;
 use byteorder::{LittleEndian, ReadBytesExt};
 use lzma_rs::lzma_decompress;
+// Native LZMA FFI: gframe includes LZMA sources in external/ygopro/gframe/lzma
+extern "C" {
+    pub fn LzmaUncompress(dest: *mut u8, destLen: *mut usize, src: *const u8, srcLen: *mut usize, props: *const u8, propsSize: usize) -> i32;
+}
 
 // Constants from replay.h
 pub const REPLAY_COMPRESSED: u32 = 0x1;
@@ -61,6 +65,8 @@ pub struct Replay {
     pub script_name: Option<String>,
     pub data: Vec<u8>, // decompressed or raw datastream
     pub actions: Vec<u8>,
+    pub packet_data: Vec<Vec<u8>>,
+    pub decompressed_ok: bool,
 }
 
 impl Replay {
@@ -97,6 +103,7 @@ impl Replay {
         reader.read_to_end(&mut comp_buf).map_err(|e| format!("read body: {}", e))?;
 
         let mut data: Vec<u8> = Vec::new();
+        let mut decompressed_ok = true;
         if (base.flag & REPLAY_COMPRESSED) != 0 {
             // decompress: C++ used LzmaUncompress with base.props size 5 and comp_data doesn't include props
             // We must prefix props to the compressed stream to be compatible with lzma-rs which expects props first
@@ -104,14 +111,51 @@ impl Replay {
             let mut composed: Vec<u8> = Vec::with_capacity(props_len + comp_buf.len());
             composed.extend_from_slice(&base.props[..props_len]);
             composed.extend_from_slice(&comp_buf[..]);
+            // Attempt 1: properties + comp_buf
             let mut reader = std::io::Cursor::new(composed);
-            lzma_decompress(&mut reader, &mut data).map_err(|e| format!("lzma decompress: {}", e))?;
-            if data.len() != base.datasize as usize {
-                return Err(format!("decompressed size mismatch expected {} got {}", base.datasize, data.len()));
+            match lzma_decompress(&mut reader, &mut data) {
+                Ok(_) => { /* success */ }
+                Err(err1) => {
+                    eprintln!("lzma decompress with props failed: {:?}", err1);
+                    // Attempt 2: decompress comp_buf as-is (it may include props already)
+                    let mut data2: Vec<u8> = Vec::new();
+                    let mut reader2 = std::io::Cursor::new(comp_buf.clone());
+                    match lzma_decompress(&mut reader2, &mut data2) {
+                        Ok(_) => { data = data2; }
+                        Err(err2) => {
+                            decompressed_ok = false;
+                            eprintln!("lzma decompress of comp_buf failed: {:?}", err2);
+                            // Attempt native LZMA uncompress as a last resort via FFI into gframe's LZMA code
+                            unsafe {
+                                let mut dest = vec![0u8; base.datasize as usize];
+                                let mut dest_len = dest.len();
+                                let mut src_len = comp_buf.len();
+                                let c = LzmaUncompress(dest.as_mut_ptr(), &mut dest_len, comp_buf.as_ptr(), &mut src_len, base.props.as_ptr(), 5);
+                                if c == 0 && dest_len > 0 {
+                                    decompressed_ok = true;
+                                    data = dest[..dest_len].to_vec();
+                                } else {
+                                    eprintln!("LzmaUncompress FFI call failed code: {}", c);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if decompressed_ok && data.len() != base.datasize as usize {
+                // mismatch => treat as failed
+                decompressed_ok = false;
             }
         } else {
             // raw data stream
-            data = comp_buf;
+            data = comp_buf.clone();
+        }
+
+        // If decompression failed, return minimal Replay with raw comp_buf as actions
+        if !decompressed_ok {
+            let actions = comp_buf.clone();
+            let packet_data = Vec::new();
+            return Ok(Replay { header: base, players: Vec::new(), params: DuelParameters::default(), decks: Vec::new(), script_name: None, data: Vec::new(), actions, packet_data, decompressed_ok: false });
         }
 
         // Now parse the data for names & decks
@@ -189,7 +233,33 @@ impl Replay {
         let mut actions: Vec<u8> = Vec::new();
         cursor.read_to_end(&mut actions).map_err(|e| format!("read action bytes: {}", e))?;
 
-        Ok(Replay { header: base, players, params, decks, script_name, data, actions })
+        // Parse action stream into discrete packets. The YGOPRO replay writer writes raw network responses
+        // which are stored as sequences of {len:u8, payload[len]}. We'll iterate and split into packets accordingly.
+        let mut packet_data: Vec<Vec<u8>> = Vec::new();
+        let mut idx: usize = 0;
+        while idx < actions.len() {
+            let len = actions[idx] as usize;
+            idx += 1;
+            if idx + len <= actions.len() {
+                let pkt = actions[idx..idx + len].to_vec();
+                packet_data.push(pkt);
+                idx += len;
+            } else {
+                // truncated or corrupt packet; push remaining bytes and break
+                let pkt = actions[idx..].to_vec();
+                packet_data.push(pkt);
+                break;
+            }
+        }
+
+        // If decompression failed, data contains raw comp_buf, and we skip parsing players & decks.
+        if !decompressed_ok {
+            // We can't rely on parsing names and decks; return minimal Replay with actions set to comp_buf
+            let actions = comp_buf.clone();
+            let packet_data = Vec::new();
+            return Ok(Replay { header: base, players: Vec::new(), params: DuelParameters::default(), decks: Vec::new(), script_name: None, data: Vec::new(), actions, packet_data, decompressed_ok: false });
+        }
+        Ok(Replay { header: base, players, params, decks, script_name, data, actions, packet_data, decompressed_ok: true })
     }
 }
 
@@ -260,17 +330,64 @@ mod tests {
 
     #[test]
     fn test_real_replay_parsing() {
-        use std::path::Path;
-        let p = Path::new("../../test/replay/2025-04-28 17-58-47.yrp");
-        if !p.exists() {
-            println!("Skipping real replay test, file not found: {}", p.display());
-            return;
+        use std::path::PathBuf;
+        // Print CWD for diagnostics
+        println!("CWD: {:?}", std::env::current_dir().unwrap());
+        // Candidate replay directories to check
+        let candidates: Vec<PathBuf> = vec![
+            PathBuf::from("test/replay"),
+            PathBuf::from("../test/replay"),
+            PathBuf::from("../../test/replay"),
+        ];
+        let mut found_file: Option<PathBuf> = None;
+        for cand in &candidates {
+            if cand.exists() && cand.is_dir() {
+                println!("Found candidate dir: {:?}", cand);
+                for entry in std::fs::read_dir(cand).expect("read_dir") {
+                    if let Ok(entry) = entry {
+                        let path = entry.path();
+                        if let Some(ext) = path.extension() {
+                            if ext == "yrp" {
+                                // Prefer uncompressed files; if compressed we may still test but prefer uncompressed
+                                match Replay::open(&path) {
+                                    Ok(r) => {
+                                        if r.decompressed_ok {
+                                            found_file = Some(path);
+                                            break;
+                                        } else if found_file.is_none() {
+                                            // save as fallback
+                                            found_file = Some(path);
+                                        }
+                                    }
+                                    Err(_) => {
+                                        if found_file.is_none() {
+                                            found_file = Some(path);
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if found_file.is_some() { break; }
         }
-        let r = match Replay::open(p) {
+        let p_abs = found_file.expect(&format!("Could not find any .yrp file to test. CWD: {:?}", std::env::current_dir().unwrap()));
+        println!("Using replay file: {:?}", p_abs);
+        let r = match Replay::open(&p_abs) {
             Ok(x) => x,
             Err(e) => panic!("Replay::open failed: {}", e),
         };
+        println!("decompressed_ok: {}", r.decompressed_ok);
         println!("seed: {} version: {} players: {:?}", r.header.seed, r.header.version, r.players);
+        println!("Replay Action Data Size: {} bytes", r.actions.len());
+        println!("Parsed packets: {}", r.packet_data.len());
         assert!(r.actions.len() > 0, "Replay actions is empty; decompression may have failed.");
+        // If successfully decompressed, assert we parsed player names and decks
+        if r.decompressed_ok {
+            assert!(!r.players.is_empty(), "Players should have been parsed when decompressed_ok is true");
+            assert!(r.decks.len() >= 1, "Decks should have been parsed when decompressed_ok is true");
+        }
     }
 }

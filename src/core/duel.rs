@@ -120,6 +120,29 @@ pub struct Duel {
 }
 
 impl Duel {
+    /// Load a replay into the duel state (seed and decks). This is a stub and will not handle action replaying.
+    pub fn load_replay(&mut self, replay: crate::core::replay::Replay) {
+        let mut data = self.data.lock().unwrap();
+        // Reset RNG using the header seed
+        data.random = Mt19937::new(replay.header.seed);
+        // Clear current decks and create cards according to replay decks
+        for (p_idx, deck) in replay.decks.iter().enumerate() {
+            let p = p_idx as u8;
+            data.field.deck[p_idx].clear();
+            for &code in deck.main.iter() {
+                // create_card will push into deck
+                drop(data);
+                let _ = self.create_card(code, p);
+                data = self.data.lock().unwrap();
+            }
+            // extras (not handled specially in field for now)
+            for &code in deck.extra.iter() {
+                drop(data);
+                let _ = self.create_card(code, p);
+                data = self.data.lock().unwrap();
+            }
+        }
+    }
     /// Handle Start processing step (shuffle & initial draw)
     fn process_start(&mut self) -> bool {
         let mut data = self.data.lock().unwrap();
