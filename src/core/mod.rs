@@ -6,3 +6,4 @@ pub mod duel;
 pub mod mtrandom;
 pub mod effect;
 pub mod chain;
+pub mod scripting;

@@ -3,8 +3,11 @@ use crate::core::enums::Location;
 use crate::core::field::Field;
 use crate::core::mtrandom::Mt19937;
 use crate::core::chain::Chain;
+use crate::core::scripting::{FileSystemLoader, ScriptLoader};
 // import Effect type (may be used for future processor logic)
 use crate::core::types::CardId;
+use mlua::Lua;
+use std::path::PathBuf;
 
 /// Duel acts as the arena holding cards and the field.
 pub struct Duel {
@@ -15,11 +18,13 @@ pub struct Duel {
     pub state: ProcessorState,
     pub turn: u32,
     pub turn_player: u8,
+    pub lua: Lua,
 }
 
 impl Duel {
     pub fn new(seed: u32) -> Self {
-        Duel { 
+        let lua = Lua::new();
+        let mut duel = Duel { 
             cards: Vec::new(), 
             field: Field::new(), 
             random: Mt19937::new(seed),
@@ -27,7 +32,28 @@ impl Duel {
             state: ProcessorState::Start,
             turn: 0,
             turn_player: 0,
-        }
+            lua,
+        };
+        duel.load_core_scripts().expect("Failed to load core Lua scripts");
+        duel
+    }
+
+    /// Load core Lua scripts (constant.lua and utility.lua) from the external YGOPro script directory.
+    pub fn load_core_scripts(&mut self) -> mlua::Result<()> {
+        let loader = FileSystemLoader::new(PathBuf::from("../external/ygopro/script"));
+        
+        // Load constant.lua
+        let constant_script = loader.load_script("constant.lua")
+            .ok_or(mlua::Error::RuntimeError("Failed to load constant.lua".to_string()))?;
+        self.lua.load(&constant_script).exec()?;
+        
+        // Note: utility.lua requires additional dependencies that aren't available yet
+        // We'll load it later when we have the full Lua environment set up
+        // let utility_script = loader.load_script("utility.lua")
+        //     .ok_or(mlua::Error::RuntimeError("Failed to load utility.lua".to_string()))?;
+        // self.lua.load(&utility_script).exec()?;
+        
+        Ok(())
     }
 
 }
@@ -326,5 +352,24 @@ mod tests {
         assert_eq!(d.field.hand[d.turn_player as usize].len(), 6);
         // Ensure state is Main1 (processing paused)
         assert_eq!(d.state, ProcessorState::Main1);
+    }
+
+    #[test]
+    fn test_lua_integration() {
+        let duel = Duel::new(42);
+        
+        // Test that Lua environment is initialized and can access constants from constant.lua
+        let result: mlua::Result<u32> = duel.lua.globals().get("TYPE_MONSTER");
+        assert!(result.is_ok(), "TYPE_MONSTER should be defined in Lua environment");
+        
+        let type_monster = result.unwrap();
+        assert_eq!(type_monster, 0x1, "TYPE_MONSTER should equal 0x1");
+        
+        // Test another constant
+        let result: mlua::Result<u32> = duel.lua.globals().get("LOCATION_DECK");
+        assert!(result.is_ok(), "LOCATION_DECK should be defined in Lua environment");
+        
+        let location_deck = result.unwrap();
+        assert_eq!(location_deck, 0x1, "LOCATION_DECK should equal 0x1");
     }
 }
