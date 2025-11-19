@@ -234,7 +234,7 @@ impl Duel {
                         // Release the lock before evaluating Lua conditions to avoid deadlocks
                         drop(data_guard);
                         // Call static raise_event handler which bridges Lua and DuelData
-                        crate::core::duel::Duel::raise_event_static(lua, data.clone(), crate::core::enums::EVENT_SUMMON_SUCCESS, Some(g), player);
+                        crate::core::duel::Duel::raise_event_static(lua, data.clone(), crate::core::enums::EVENT_SUMMON_SUCCESS, Some(g), player, None);
                         return Ok(1);
                     }
                 }
@@ -277,7 +277,7 @@ impl Duel {
             };
             if let Some(link) = next_link {
                 // Execute effect operation using saved effect id and trigger player
-                let _ = Duel::execute_effect_static(&self.lua, self.data.clone(), link.effect_id, 0u32, link.target_cards, 0u8, link.trigger_player);
+                let _ = Duel::execute_effect_static(&self.lua, self.data.clone(), link.effect_id, 0u32, link.target_cards, link.reason_effect, link.reason_player, link.trigger_player);
             } else {
                 break;
             }
@@ -285,7 +285,7 @@ impl Duel {
     }
 
     /// Static helper to raise events from contexts where we only have Lua and access to the DuelData via app data.
-    pub fn raise_event_static(lua: &Lua, data_arc: Arc<Mutex<DuelData>>, code: u32, _event_cards: Option<Group>, _reason_player: u8) {
+    pub fn raise_event_static(lua: &Lua, data_arc: Arc<Mutex<DuelData>>, code: u32, event_cards: Option<Group>, reason_player: u8, reason_effect: Option<EffectId>) {
         // Step 1: get list of candidate effect IDs from data
         let candidates = {
             let data_guard = data_arc.lock().unwrap();
@@ -314,7 +314,7 @@ impl Duel {
         for (eid, maybe_fn) in callable {
             let result = if let Some(func) = maybe_fn {
                 // Build args for condition function
-                let args = (eid, 0u8, None::<Group>, 0u8, 0u32, None::<EffectId>, 0u32, 0u8);
+                let args = Duel::get_lua_args(lua, eid, reason_player, &event_cards, reason_player, reason_effect).expect("Failed to build args");
                 match func.call::<_, bool>(args) {
                     Ok(b) => b,
                     Err(_) => false,
@@ -326,14 +326,23 @@ impl Duel {
                 let mut data_guard = data_arc.lock().unwrap();
                 // Record triggered effect and push to chain
                 data_guard.triggered_effects.push(eid);
-                let link = crate::core::chain::ChainLink { effect_id: eid, trigger_player: 0, target_cards: None };
+                let link = crate::core::chain::ChainLink { effect_id: eid, trigger_player: 0, target_cards: event_cards.clone(), reason_effect: reason_effect, reason_player };
                 data_guard.chain.add(link);
             }
         }
     }
 
+    /// Helper to produce Lua argument tuple (e, tp, eg, ep, ev, re, r, rp)
+    pub fn get_lua_args<'lua>(_lua: &'lua Lua, effect_id: EffectId, trigger_player: u8, event_cards: &Option<Group>, reason_player: u8, reason_effect: Option<EffectId>) -> mlua::Result<(EffectId, u8, Option<Group>, u8, u32, Option<EffectId>, u32, u8)> {
+        // We can copy Group and Option<EffectId> directly as they are ToLua.
+        let eg = event_cards.clone();
+        let re = reason_effect;
+        let args = (effect_id, trigger_player, eg, reason_player, 0u32, re, 0u32, reason_player);
+        Ok(args)
+    }
+
     /// Execute an effect's operation function.
-    pub fn execute_effect_static(lua: &Lua, data_arc: Arc<Mutex<DuelData>>, effect_id: EffectId, _code: u32, event_cards: Option<Group>, reason_player: u8, trigger_player: u8) -> mlua::Result<()> {
+    pub fn execute_effect_static(lua: &Lua, data_arc: Arc<Mutex<DuelData>>, effect_id: EffectId, _code: u32, event_cards: Option<Group>, reason_effect: Option<EffectId>, reason_player: u8, trigger_player: u8) -> mlua::Result<()> {
         // Get the operation function if any
         let op_func = {
             let data_guard = data_arc.lock().unwrap();
@@ -346,7 +355,7 @@ impl Duel {
 
         if let Some(func) = op_func {
             // Build arguments tuple (e, tp, eg, ep, ev, re, r, rp)
-            let args = (effect_id, trigger_player, event_cards, reason_player, 0u32, None::<EffectId>, 0u32, reason_player);
+            let args = Duel::get_lua_args(lua, effect_id, trigger_player, &event_cards, reason_player, reason_effect)?;
             // Call the operation function
             let _res: mlua::Value = func.call(args)?;
         }
@@ -1087,5 +1096,49 @@ mod tests {
         } else {
             panic!("card consistently missing");
         }
+    }
+
+    #[test]
+    fn test_lua_args_integrity() {
+        let mut duel = Duel::new(42);
+        let card_id = duel.create_card(12345, 0);
+        duel.move_card(card_id, 0, Location::HAND, 0);
+
+        // Register an effect which uses tp and e in condition and operation
+        let script = format!(r#"
+            local c = Card({})
+            local e = Effect.CreateEffect(c)
+            e:SetCode(0x1000)
+            e:SetCondition(function(e, tp, eg, ep, ev, re, r, rp)
+                if tp ~= 0 then return false end
+                if e == nil then return false end
+                return true
+            end)
+            e:SetOperation(function(e, tp, eg, ep, ev, re, r, rp)
+                local h = e:GetHandler()
+                if h:GetCode() == 12345 then Duel.SendtoGrave(h, REASON_EFFECT) end
+            end)
+            c:RegisterEffect(e)
+            return nil
+        "#, card_id.0);
+        let result: mlua::Result<()> = duel.lua.load(&script).exec();
+        assert!(result.is_ok(), "Lua script to register effect should run");
+
+        // Summon triggers the chain
+        let res: mlua::Result<u32> = duel.lua.load(format!(r#"
+            local c = Card({})
+            return Duel.Summon(0, c, false, nil)
+        "#, card_id.0)).eval();
+        assert!(res.is_ok(), "Duel.Summon should work");
+
+        // Chain should have item; resolve to execute and move card to grave
+        {
+            let data = duel.data.lock().unwrap();
+            assert_eq!(data.chain.links.len(), 1, "Chain should have one link");
+        }
+        duel.resolve_chain();
+        let data = duel.data.lock().unwrap();
+        let card = data.get_card(card_id).expect("card exists");
+        assert!(card.location.contains(Location::GRAVE), "Card should be moved to grave by operation");
     }
 }

@@ -6,6 +6,8 @@ pub struct ChainLink {
     pub effect_id: EffectId,
     pub trigger_player: u8,
     pub target_cards: Option<Group>,
+    pub reason_effect: Option<EffectId>,
+    pub reason_player: u8,
 }
 
 pub struct Chain {
@@ -35,8 +37,8 @@ mod tests {
     #[test]
     fn chain_add_and_resolve() {
         let mut c = Chain::new();
-        let l1 = ChainLink { effect_id: EffectId::new(1), trigger_player: 0, target_cards: None };
-        let l2 = ChainLink { effect_id: EffectId::new(2), trigger_player: 1, target_cards: None };
+        let l1 = ChainLink { effect_id: EffectId::new(1), trigger_player: 0, target_cards: None, reason_effect: None, reason_player: 0 };
+        let l2 = ChainLink { effect_id: EffectId::new(2), trigger_player: 1, target_cards: None, reason_effect: None, reason_player: 1 };
         c.add(l1);
         c.add(l2);
         let r = c.pop().expect("link");
