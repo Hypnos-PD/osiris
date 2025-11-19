@@ -126,6 +126,28 @@ bitflags! {
     }
 }
 
+// Card Status flags (STATUS_* in C++)
+bitflags! {
+    pub struct CardStatus: u32 {
+        const DISABLED = 0x1; // STATUS_DISABLED
+        const TO_ENABLE = 0x2; // STATUS_TO_ENABLE
+        const TO_DISABLE = 0x4; // STATUS_TO_DISABLE
+        const PROC_COMPLETE = 0x8; // STATUS_PROC_COMPLETE
+        const SET_TURN = 0x10; // STATUS_SET_TURN
+        const NO_LEVEL = 0x20; // STATUS_NO_LEVEL
+        const BATTLE_RESULT = 0x40; // STATUS_BATTLE_RESULT
+        const SPSUMMON_STEP = 0x80; // STATUS_SPSUMMON_STEP
+        const CANNOT_CHANGE_FORM = 0x100; // STATUS_CANNOT_CHANGE_FORM
+        const SUMMONING = 0x200; // STATUS_SUMMONING
+        const EFFECT_ENABLED = 0x400; // STATUS_EFFECT_ENABLED
+        const SUMMON_TURN = 0x800; // STATUS_SUMMON_TURN
+        const DESTROY_CONFIRMED = 0x1000; // STATUS_DESTROY_CONFIRMED
+        const LEAVE_CONFIRMED = 0x2000; // STATUS_LEAVE_CONFIRMED
+        const BATTLE_DESTROYED = 0x4000; // STATUS_BATTLE_DESTROYED
+        const ATTACK_CANCELED = 0x200000; // STATUS_ATTACK_CANCELED
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

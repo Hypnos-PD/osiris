@@ -39,7 +39,7 @@ pub struct Card {
 
     // Flags
     // Placeholder for now; we can implement CardStatus as bitflags later.
-    pub status: u32,
+    pub status: CardStatus,
 }
 
 impl Card {
@@ -56,7 +56,7 @@ impl Card {
             owner: 0,
             controller: 0,
             reason: 0,
-            status: 0,
+            status: CardStatus::empty(),
         }
     }
 }
