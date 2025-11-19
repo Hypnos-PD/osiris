@@ -167,3 +167,10 @@ mod tests {
         assert_eq!(mem::size_of::<CardRace>(), mem::size_of::<u32>());
     }
 }
+
+// Event constants (simple integer codes for game events)
+pub const EVENT_SUMMON_SUCCESS: u32 = 0x1000;
+pub const EVENT_FLIP_SUMMON_SUCCESS: u32 = 0x1001;
+pub const EVENT_SPSUMMON_SUCCESS: u32 = 0x1002;
+pub const EVENT_DRAW: u32 = 0x1003;
+pub const EVENT_MOVE: u32 = 0x1004;

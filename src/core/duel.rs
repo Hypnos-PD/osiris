@@ -6,6 +6,7 @@ use crate::core::chain::Chain;
 use crate::core::scripting::{FileSystemLoader, ScriptLoader};
 use crate::core::group::Group;
 use crate::core::effect::Effect;
+use crate::core::event::Event;
 use crate::core::types::EffectId;
 // import Effect type (may be used for future processor logic)
 use crate::core::types::CardId;
@@ -23,6 +24,7 @@ pub struct DuelData {
     pub turn: u32,
     pub turn_player: u8,
     pub effects: Vec<Effect>,
+    pub triggered_effects: Vec<EffectId>,
 }
 
 impl DuelData {
@@ -93,6 +95,19 @@ impl DuelData {
             }
         }
         id
+    }
+
+    /// Raise an event and check all registered effects for triggers.
+    pub fn raise_event(&mut self, code: u32, event_cards: Option<Group>, reason_player: u8) {
+        let event = Event::new(code, None, reason_player, event_cards);
+        // For now, simply check the code against registered effects and log and record triggers.
+        for (idx, effect) in self.effects.iter().enumerate() {
+            if effect.code == event.code {
+                let eid = EffectId::new(idx as u32);
+                println!("Effect Triggered: id={} code={}", eid.0, effect.code);
+                self.triggered_effects.push(eid);
+            }
+        }
     }
 }
 
@@ -216,6 +231,10 @@ impl Duel {
                         if let Some(card_mut) = data_guard.cards.get_mut(card_id.0 as usize) {
                             card_mut.set_status(CardStatus::SUMMON_TURN);
                         }
+                        // Raise summon success event with the card wrapped in a Group
+                        let mut g = Group::new();
+                        g.0.insert(*card_id);
+                        data_guard.raise_event(crate::core::enums::EVENT_SUMMON_SUCCESS, Some(g), player);
                         return Ok(1);
                     }
                 }
@@ -235,6 +254,7 @@ impl Duel {
             turn: 0,
             turn_player: 0,
             effects: Vec::new(),
+            triggered_effects: Vec::new(),
         }));
         
         // Inject state into Lua
@@ -838,5 +858,49 @@ mod tests {
         // Verify the effect is in the duel effects arena with correct code
         assert!(data.effects.len() > 0, "Duel effects arena should have at least one effect");
         assert_eq!(data.effects[0].code, 123);
+    }
+
+    #[test]
+    fn test_event_trigger() {
+        let mut duel = Duel::new(42);
+        let card_id = duel.create_card(400, 0);
+        duel.move_card(card_id, 0, Location::HAND, 0);
+
+        // Register an effect that triggers on summon success
+        let result: mlua::Result<()> = duel.lua.load(format!(r#"
+            local c = Card({})
+            local e = Effect.CreateEffect(c)
+            e:SetCode(0x1000)
+            c:RegisterEffect(e)
+            return nil
+        "#, card_id.0)).exec();
+        assert!(result.is_ok(), "Lua script to register effect should run");
+
+        // Ensure no triggers before summon
+        {
+            let data = duel.data.lock().unwrap();
+            assert!(data.triggered_effects.is_empty(), "No triggered effects initially");
+        }
+
+        // Summon the card (should trigger event)
+        let result: mlua::Result<u32> = duel.lua.load(format!(
+            r#"
+            local c = Card({})
+            return Duel.Summon(0, c, false, nil)
+            "#,
+            card_id.0
+        )).eval();
+        assert!(result.is_ok(), "Duel.Summon should work");
+
+        // Verify trigger recorded
+        {
+            let data = duel.data.lock().unwrap();
+            let c = data.get_card(card_id).unwrap();
+            assert!(!c.effects.is_empty(), "Card has effect attached");
+            let eid = c.effects[0];
+            assert!(data.triggered_effects.contains(&eid), "Effect should have been triggered by the event");
+            // Also verify arena effect code
+            assert_eq!(data.effects[eid.0 as usize].code, 0x1000);
+        }
     }
 }

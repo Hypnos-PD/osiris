@@ -8,3 +8,4 @@ pub mod effect;
 pub mod chain;
 pub mod scripting;
 pub mod group;
+pub mod event;
