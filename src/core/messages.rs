@@ -205,3 +205,65 @@ pub fn parse_packet(data: &[u8]) -> (MsgType, &[u8]) {
     let id = data[0];
     (MsgType::from(id), &data[1..])
 }
+
+// Payload parsers for some important message types
+use std::io::Cursor;
+use byteorder::{LittleEndian, ReadBytesExt};
+/// Start message payload
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgStart {
+    pub player_type: u8,
+    pub lp: [u32; 2],
+    pub deck_count: [u16; 2],
+    pub extra_count: [u16; 2],
+    pub hand_count: [u16; 2],
+}
+
+impl MsgStart {
+    pub fn parse(payload: &[u8]) -> Option<MsgStart> {
+        let mut cursor = Cursor::new(payload);
+        let player_type = cursor.read_u8().ok()?;
+        let lp0 = cursor.read_u32::<LittleEndian>().ok()?;
+        let lp1 = cursor.read_u32::<LittleEndian>().ok()?;
+        let d0 = cursor.read_u16::<LittleEndian>().ok()?;
+        let d1 = cursor.read_u16::<LittleEndian>().ok()?;
+        let e0 = cursor.read_u16::<LittleEndian>().ok()?;
+        let e1 = cursor.read_u16::<LittleEndian>().ok()?;
+        let h0 = cursor.read_u16::<LittleEndian>().ok()?;
+        let h1 = cursor.read_u16::<LittleEndian>().ok()?;
+        Some(MsgStart { player_type, lp: [lp0, lp1], deck_count: [d0, d1], extra_count: [e0, e1], hand_count: [h0, h1] })
+    }
+}
+
+/// New turn payload
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgNewTurn { pub player: u8 }
+
+impl MsgNewTurn { pub fn parse(payload: &[u8]) -> Option<MsgNewTurn> { Some(MsgNewTurn { player: Cursor::new(payload).read_u8().ok()? }) } }
+
+/// Draw payload: player, count
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgDraw { pub player: u8, pub count: u8 }
+
+impl MsgDraw {
+    pub fn parse(payload: &[u8]) -> Option<MsgDraw> {
+        let mut cursor = Cursor::new(payload);
+        let player = cursor.read_u8().ok()?;
+        let count = cursor.read_u8().ok()?;
+        Some(MsgDraw { player, count })
+    }
+}
+
+/// LP update: player, new LP (u32)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgLpUpdate { pub player: u8, pub lp: u32 }
+
+impl MsgLpUpdate {
+    pub fn parse(payload: &[u8]) -> Option<MsgLpUpdate> {
+        let mut cursor = Cursor::new(payload);
+        let player = cursor.read_u8().ok()?;
+        let lp = cursor.read_u32::<LittleEndian>().ok()?;
+        Some(MsgLpUpdate { player, lp })
+    }
+}
+

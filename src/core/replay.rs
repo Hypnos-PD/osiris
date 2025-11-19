@@ -233,24 +233,55 @@ impl Replay {
         let mut actions: Vec<u8> = Vec::new();
         cursor.read_to_end(&mut actions).map_err(|e| format!("read action bytes: {}", e))?;
 
-        // Parse action stream into discrete packets. The YGOPRO replay writer writes raw network responses
-        // which are stored as sequences of {len:u8, payload[len]}. We'll iterate and split into packets accordingly.
-        let mut packet_data: Vec<Vec<u8>> = Vec::new();
-        let mut idx: usize = 0;
-        while idx < actions.len() {
-            let len = actions[idx] as usize;
-            idx += 1;
-            if idx + len <= actions.len() {
-                let pkt = actions[idx..idx + len].to_vec();
-                packet_data.push(pkt);
-                idx += len;
-            } else {
-                // truncated or corrupt packet; push remaining bytes and break
-                let pkt = actions[idx..].to_vec();
-                packet_data.push(pkt);
-                break;
+        // Parse action stream into discrete packets.
+        // Try two possible framings:
+        //  - 1-byte len prefix
+        //  - 2-byte len prefix (little-endian u16)
+        // We'll score each attempt by counting truncated packets and choose the framing with fewer truncations.
+        fn split_with_u8(actions: &[u8]) -> (Vec<Vec<u8>>, usize) {
+            let mut packets: Vec<Vec<u8>> = Vec::new();
+            let mut idx: usize = 0;
+            let mut truncs = 0usize;
+            while idx < actions.len() {
+                let len = actions[idx] as usize;
+                idx += 1;
+                if idx + len <= actions.len() {
+                    packets.push(actions[idx..idx + len].to_vec());
+                    idx += len;
+                } else {
+                    packets.push(actions[idx..].to_vec());
+                    truncs += 1;
+                    break;
+                }
             }
+            (packets, truncs)
         }
+        fn split_with_u16(actions: &[u8]) -> (Vec<Vec<u8>>, usize) {
+            let mut packets: Vec<Vec<u8>> = Vec::new();
+            let mut idx: usize = 0;
+            let mut truncs = 0usize;
+            while idx + 2 <= actions.len() {
+                let len = u16::from_le_bytes([actions[idx], actions[idx + 1]]) as usize;
+                idx += 2;
+                if idx + len <= actions.len() {
+                    packets.push(actions[idx..idx + len].to_vec());
+                    idx += len;
+                } else {
+                    packets.push(actions[idx..].to_vec());
+                    truncs += 1;
+                    break;
+                }
+            }
+            if idx < actions.len() && actions.len() - idx > 0 { // leftover
+                packets.push(actions[idx..].to_vec());
+            }
+            (packets, truncs)
+        }
+        let (pack_u8, trunc_u8) = split_with_u8(&actions);
+        let (pack_u16, trunc_u16) = split_with_u16(&actions);
+        println!("split attempt results: u8 truncs: {} u16 truncs: {} packets u8: {} u16: {}", trunc_u8, trunc_u16, pack_u8.len(), pack_u16.len());
+        let (packet_data, used) = if trunc_u8 <= trunc_u16 { (pack_u8, "u8") } else { (pack_u16, "u16") };
+        println!("Using split method: {} ({} packets)", used, packet_data.len());
 
         // If decompression failed, data contains raw comp_buf, and we skip parsing players & decks.
         if !decompressed_ok {
@@ -391,12 +422,41 @@ mod tests {
         }
 
         // parse first N packets and print their types
-        use crate::core::messages::{parse_packet, MsgType};
+        use crate::core::messages::{parse_packet, MsgType, MsgStart, MsgNewTurn};
         let n = 20usize;
         let mut seen: Vec<MsgType> = Vec::new();
         for pkt in r.packet_data.iter().take(n) {
-            let (msg, _payload) = parse_packet(pkt);
-            println!("Packet msg: {:?}", msg);
+            let (msg, payload) = parse_packet(pkt);
+            println!("Packet msg: {:?} payload len {}", msg, payload.len());
+            match msg {
+                MsgType::Start => {
+                    if let Some(s) = MsgStart::parse(payload) {
+                        println!("Parsed MSG_START: ty {} lp {:?} deck {:?} extra {:?} hand {:?}", s.player_type, s.lp, s.deck_count, s.extra_count, s.hand_count);
+                        assert!(s.lp[0] > 0);
+                    } else { println!("Failed to parse MSG_START payload") }
+                }
+                MsgType::NewTurn => {
+                    if let Some(t) = MsgNewTurn::parse(payload) {
+                        println!("Parsed MSG_NEW_TURN: player {}", t.player);
+                    } else { println!("Failed to parse MSG_NEW_TURN payload") }
+                }
+                MsgType::Draw => {
+                    if let Some(d) = crate::core::messages::MsgDraw::parse(payload) {
+                        println!("Parsed MSG_DRAW: player {} count {}", d.player, d.count);
+                    }
+                }
+                MsgType::LpUpdate => {
+                    if let Some(l) = crate::core::messages::MsgLpUpdate::parse(payload) {
+                        println!("Parsed MSG_LP_UPDATE: player {} lp {}", l.player, l.lp);
+                    }
+                }
+                _ => {
+                    if let MsgType::Unknown(x) = msg {
+                        let hx = payload.iter().map(|b| format!("{:02x}", b)).collect::<Vec<String>>().join(" ");
+                        println!("Unknown message id {} payload hex: {}", x, hx);
+                    }
+                }
+            }
             seen.push(msg);
         }
     }
