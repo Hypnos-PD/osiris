@@ -7,15 +7,20 @@ pub struct StatBlock {
     pub level: u32,
     pub rank: u32,
     pub link: u32,
+    pub code2: u32,
+    pub lscale: u32,
+    pub rscale: u32,
     pub attribute: CardAttribute,
     pub race: CardRace,
     pub attack: i32,
     pub defense: i32,
+    pub base_attack: i32,
+    pub base_defense: i32,
 }
 
 // Default derived above; custom default ensures bitflags are set to empty
 impl Default for StatBlock {
-    fn default() -> Self { StatBlock { type_: CardType::empty(), level: 0, rank: 0, link: 0, attribute: CardAttribute::empty(), race: CardRace::empty(), attack: 0, defense: 0 } }
+    fn default() -> Self { StatBlock { type_: CardType::empty(), level: 0, rank: 0, link: 0, code2: 0, lscale: 0, rscale: 0, attribute: CardAttribute::empty(), race: CardRace::empty(), attack: 0, defense: 0, base_attack: 0, base_defense: 0 } }
 }
 
 /// Card structure for osiris core. Does not hold references to other cards or duel.
@@ -59,6 +64,21 @@ impl Card {
             status: CardStatus::empty(),
         }
     }
+
+    /// Mark the given status bits on the card.
+    pub fn set_status(&mut self, status: CardStatus) {
+        self.status |= status;
+    }
+
+    /// Clear the given status bits on the card.
+    pub fn clear_status(&mut self, status: CardStatus) {
+        self.status.remove(status);
+    }
+
+    /// Test whether the card has at least one of the `status` bits set.
+    pub fn has_status(&self, status: CardStatus) -> bool {
+        self.status.intersects(status)
+    }
 }
 
 #[cfg(test)]
@@ -71,5 +91,15 @@ mod tests {
         assert_eq!(c.alias, 0);
         assert_eq!(c.location.bits(), 0);
         assert_eq!(c.current_stats.attack, 0);
+    }
+
+    #[test]
+    fn status_helpers_work() {
+        let mut c = Card::new(1);
+        assert!(!c.has_status(CardStatus::DISABLED));
+        c.set_status(CardStatus::DISABLED);
+        assert!(c.has_status(CardStatus::DISABLED));
+        c.clear_status(CardStatus::DISABLED);
+        assert!(!c.has_status(CardStatus::DISABLED));
     }
 }
