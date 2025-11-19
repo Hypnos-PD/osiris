@@ -435,7 +435,7 @@ mod tests {
             match msg {
                 MsgType::Start => {
                     if let Some(s) = MsgStart::parse(payload) {
-                        println!("Parsed MSG_START: ty {} lp {:?} deck {:?} extra {:?} hand {:?}", s.player_type, s.lp, s.deck_count, s.extra_count, s.hand_count);
+                        println!("Parsed MSG_START: ty {} rule {} lp {:?} deck {:?} extra {:?}", s.player_type, s.duel_rule, s.lp, s.deck_count, s.extra_count);
                         assert!(s.lp[0] > 0);
                     } else { println!("Failed to parse MSG_START payload") }
                 }
@@ -491,5 +491,349 @@ mod tests {
             seen.push(msg);
         }
         println!("Summary counts: moves={} summons={} spsummons={} chains={}", move_count, summon_count, spsummon_count, chain_count);
+    }
+
+    #[test]
+    fn test_debug_id0_messages() {
+        use std::path::PathBuf;
+        use std::fs;
+        
+        // Print CWD for diagnostics
+        println!("CWD: {:?}", std::env::current_dir().unwrap());
+        
+        // Candidate replay directories to check
+        let candidates: Vec<PathBuf> = vec![
+            PathBuf::from("test/replay"),
+            PathBuf::from("../test/replay"),
+            PathBuf::from("../../test/replay"),
+        ];
+        
+        let mut replay_dir: Option<PathBuf> = None;
+        for cand in &candidates {
+            if cand.exists() && cand.is_dir() {
+                replay_dir = Some(cand.clone());
+                println!("Found replay directory: {:?}", cand);
+                break;
+            }
+        }
+        
+        let replay_dir = replay_dir.expect("Could not find replay directory");
+        
+        // Take first 5 replay files for detailed analysis
+        let mut analyzed_files = 0;
+        for entry in fs::read_dir(&replay_dir).expect("Failed to read replay directory") {
+            if analyzed_files >= 5 {
+                break;
+            }
+            
+            if let Ok(entry) = entry {
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext == "yrp" {
+                        analyzed_files += 1;
+                        println!("\n=== Analyzing ID 0 messages in: {} ===", path.display());
+                        
+                        match Replay::open(&path) {
+                            Ok(r) => {
+                                println!("  Successfully opened replay");
+                                println!("  Parsed packets: {}", r.packet_data.len());
+                                
+                                // Parse packets and examine ID 0 messages
+                                use crate::core::messages::{parse_replay_packet, MsgType, MsgStart};
+                                
+                                let mut id0_count = 0usize;
+                                let mut id0_with_18_bytes = 0usize;
+                                let mut parsed_as_start = 0usize;
+                                
+                                for (i, pkt) in r.packet_data.iter().enumerate() {
+                                    let (_container, msg, payload) = parse_replay_packet(pkt);
+                                    
+                                    if let MsgType::Unknown(0) = msg {
+                                        id0_count += 1;
+                                        
+                                        if payload.len() == 18 {
+                                            id0_with_18_bytes += 1;
+                                            println!("  Packet {}: ID 0 with 18 bytes - potential MSG_START", i);
+                                            
+                                            // Try to parse as MSG_START
+                                            if let Some(msg_start) = MsgStart::parse(payload) {
+                                                parsed_as_start += 1;
+                                                println!("    SUCCESS: Parsed as MSG_START - player_type={}, duel_rule={}, lp={:?}, deck_count={:?}, extra_count={:?}", 
+                                                    msg_start.player_type, msg_start.duel_rule, msg_start.lp, msg_start.deck_count, msg_start.extra_count);
+                                            } else {
+                                                println!("    FAILED: Could not parse as MSG_START");
+                                                // Print hex dump for analysis
+                                                let hex_dump: Vec<String> = payload.iter().map(|b| format!("{:02x}", b)).collect();
+                                                println!("    Hex: {}", hex_dump.join(" "));
+                                            }
+                                        } else {
+                                            println!("  Packet {}: ID 0 with {} bytes - not MSG_START", i, payload.len());
+                                        }
+                                    }
+                                }
+                                
+                                println!("  ID 0 Summary: total={}, with_18_bytes={}, parsed_as_start={}", 
+                                    id0_count, id0_with_18_bytes, parsed_as_start);
+                            }
+                            Err(e) => {
+                                println!("  FAILED: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_bulk_replay_parsing() {
+        use std::path::PathBuf;
+        use std::fs;
+        use std::collections::HashMap;
+        
+        // Print CWD for diagnostics
+        println!("CWD: {:?}", std::env::current_dir().unwrap());
+        
+        // Candidate replay directories to check
+        let candidates: Vec<PathBuf> = vec![
+            PathBuf::from("test/replay"),
+            PathBuf::from("../test/replay"),
+            PathBuf::from("../../test/replay"),
+        ];
+        
+        let mut replay_dir: Option<PathBuf> = None;
+        for cand in &candidates {
+            if cand.exists() && cand.is_dir() {
+                replay_dir = Some(cand.clone());
+                println!("Found replay directory: {:?}", cand);
+                break;
+            }
+        }
+        
+        let replay_dir = replay_dir.expect("Could not find replay directory");
+        
+        let mut passed = 0;
+        let mut failed = 0;
+        let mut total_files = 0;
+        
+        // Global statistics
+        let mut global_unknown_ids: HashMap<u8, u32> = HashMap::new();
+        let mut global_message_counts: HashMap<String, u32> = HashMap::new();
+        
+        // Iterate over all .yrp files in the directory
+        for entry in fs::read_dir(&replay_dir).expect("Failed to read replay directory") {
+            if let Ok(entry) = entry {
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext == "yrp" {
+                        total_files += 1;
+                        println!("\n=== Testing file: {} ===", path.display());
+                        
+                        match Replay::open(&path) {
+                            Ok(r) => {
+                                println!("  Successfully opened replay");
+                                println!("  decompressed_ok: {}", r.decompressed_ok);
+                                println!("  seed: {} version: {} players: {:?}", r.header.seed, r.header.version, r.players);
+                                println!("  Replay Action Data Size: {} bytes", r.actions.len());
+                                println!("  Parsed packets: {}", r.packet_data.len());
+                                
+                                // Parse packets and count message types
+                                use crate::core::messages::{parse_replay_packet, MsgType, MsgStart, MsgNewTurn, MsgMove, MsgSummoning, MsgSpSummoning, MsgChaining, MsgRetry, MsgWin, MsgHint, MsgWaiting, MsgUpdateData, MsgUpdateCard, MsgRequestDeck, MsgShowHint, MsgRefreshDeck};
+                                
+                                let mut move_count = 0usize;
+                                let mut summon_count = 0usize;
+                                let mut spsummon_count = 0usize;
+                                let mut chain_count = 0usize;
+                                let mut start_count = 0usize;
+                                let mut newturn_count = 0usize;
+                                let mut retry_count = 0usize;
+                                let mut win_count = 0usize;
+                                let mut hint_count = 0usize;
+                                let mut waiting_count = 0usize;
+                                let mut update_data_count = 0usize;
+                                let mut update_card_count = 0usize;
+                                let mut request_deck_count = 0usize;
+                                let mut show_hint_count = 0usize;
+                                let mut refresh_deck_count = 0usize;
+                                let mut unknown_count = 0usize;
+                                let mut file_unknown_ids: HashMap<u8, u32> = HashMap::new();
+                                let mut container_count = 0usize;
+                                
+                                for pkt in &r.packet_data {
+                                    let (container, msg, payload) = parse_replay_packet(pkt);
+                                    if container.is_some() {
+                                        container_count += 1;
+                                    }
+                                    match msg {
+                                        MsgType::Start => {
+                                            if MsgStart::parse(payload).is_some() {
+                                                start_count += 1;
+                                                *global_message_counts.entry("START".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::NewTurn => {
+                                            if MsgNewTurn::parse(payload).is_some() {
+                                                newturn_count += 1;
+                                                *global_message_counts.entry("NEW_TURN".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::Move => {
+                                            if MsgMove::parse(payload).is_some() {
+                                                move_count += 1;
+                                                *global_message_counts.entry("MOVE".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::Summoning => {
+                                            if MsgSummoning::parse(payload).is_some() {
+                                                summon_count += 1;
+                                                *global_message_counts.entry("SUMMON".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::SPSummoning => {
+                                            if MsgSpSummoning::parse(payload).is_some() {
+                                                spsummon_count += 1;
+                                                *global_message_counts.entry("SP_SUMMON".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::Chaining => {
+                                            if MsgChaining::parse(payload).is_some() {
+                                                chain_count += 1;
+                                                *global_message_counts.entry("CHAIN".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::Retry => {
+                                            if MsgRetry::parse(payload).is_some() {
+                                                retry_count += 1;
+                                                *global_message_counts.entry("Retry".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::Win => {
+                                            if MsgWin::parse(payload).is_some() {
+                                                win_count += 1;
+                                                *global_message_counts.entry("Win".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::Hint => {
+                                            if MsgHint::parse(payload).is_some() {
+                                                hint_count += 1;
+                                                *global_message_counts.entry("Hint".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::Waiting => {
+                                            if MsgWaiting::parse(payload).is_some() {
+                                                waiting_count += 1;
+                                                *global_message_counts.entry("Waiting".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::UpdateData => {
+                                            if MsgUpdateData::parse(payload).is_some() {
+                                                update_data_count += 1;
+                                                *global_message_counts.entry("UpdateData".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::UpdateCard => {
+                                            if MsgUpdateCard::parse(payload).is_some() {
+                                                update_card_count += 1;
+                                                *global_message_counts.entry("UpdateCard".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::RequestDeck => {
+                                            if MsgRequestDeck::parse(payload).is_some() {
+                                                request_deck_count += 1;
+                                                *global_message_counts.entry("RequestDeck".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::ShowHint => {
+                                            if MsgShowHint::parse(payload).is_some() {
+                                                show_hint_count += 1;
+                                                *global_message_counts.entry("ShowHint".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::RefreshDeck => {
+                                            if MsgRefreshDeck::parse(payload).is_some() {
+                                                refresh_deck_count += 1;
+                                                *global_message_counts.entry("RefreshDeck".to_string()).or_insert(0) += 1;
+                                            }
+                                        }
+                                        MsgType::Unknown(id) => {
+                                            unknown_count += 1;
+                                            *file_unknown_ids.entry(id).or_insert(0) += 1;
+                                            *global_unknown_ids.entry(id).or_insert(0) += 1;
+                                            *global_message_counts.entry(format!("UNKNOWN_{}", id)).or_insert(0) += 1;
+                                            
+                                            // Debug: Check if this is actually MSG_START with wrong ID
+                                            if (id == 255 || id == 0) && payload.len() == 18 {
+                                                println!("  DEBUG: Found potential MSG_START with ID {}, payload length: {}", id, payload.len());
+                                                // Try to parse as MSG_START to verify
+                                                if let Some(msg_start) = MsgStart::parse(payload) {
+                                                    println!("  DEBUG: Successfully parsed as MSG_START: player_type={}, duel_rule={}, lp={:?}, deck_count={:?}, extra_count={:?}", 
+                                                        msg_start.player_type, msg_start.duel_rule, msg_start.lp, msg_start.deck_count, msg_start.extra_count);
+                                                } else {
+                                                    println!("  DEBUG: Failed to parse as MSG_START");
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            let msg_name = format!("{:?}", msg);
+                                            *global_message_counts.entry(msg_name).or_insert(0) += 1;
+                                        }
+                                    }
+                                }
+                                
+                                println!("  Message counts: CONTAINERS={} START={} NEW_TURN={} MOVE={} SUMMON={} SP_SUMMON={} CHAIN={} RETRY={} WIN={} HINT={} WAITING={} UPDATE_DATA={} UPDATE_CARD={} REQUEST_DECK={} SHOW_HINT={} REFRESH_DECK={} UNKNOWN={}", 
+                                    container_count, start_count, newturn_count, move_count, summon_count, spsummon_count, chain_count, retry_count, win_count, hint_count, waiting_count, update_data_count, update_card_count, request_deck_count, show_hint_count, refresh_deck_count, unknown_count);
+                                
+                                // Print unknown IDs for this file if any
+                                if !file_unknown_ids.is_empty() {
+                                    let mut sorted_ids: Vec<_> = file_unknown_ids.iter().collect();
+                                    sorted_ids.sort_by(|a, b| b.1.cmp(a.1));
+                                    println!("  Unknown IDs: {}", 
+                                        sorted_ids.iter()
+                                            .map(|(id, count)| format!("{}={}", id, count))
+                                            .collect::<Vec<_>>()
+                                            .join(" "));
+                                }
+                                
+                                passed += 1;
+                            }
+                            Err(e) => {
+                                println!("  FAILED: {}", e);
+                                failed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        println!("\n=== BULK TEST SUMMARY ===");
+        println!("Total files: {}", total_files);
+        println!("Passed: {}", passed);
+        println!("Failed: {}", failed);
+        
+        // Print global statistics
+        if !global_message_counts.is_empty() {
+            println!("\n=== GLOBAL MESSAGE STATISTICS ===");
+            let mut sorted_counts: Vec<_> = global_message_counts.iter().collect();
+            sorted_counts.sort_by(|a, b| b.1.cmp(a.1));
+            for (msg_type, count) in sorted_counts {
+                println!("  {}: {}", msg_type, count);
+            }
+        }
+        
+        // Print unknown message ID analysis
+        if !global_unknown_ids.is_empty() {
+            println!("\n=== UNKNOWN MESSAGE ID ANALYSIS ===");
+            let mut sorted_unknowns: Vec<_> = global_unknown_ids.iter().collect();
+            sorted_unknowns.sort_by(|a, b| b.1.cmp(a.1));
+            for (id, count) in sorted_unknowns {
+                println!("  ID {}: {} occurrences", id, count);
+            }
+        }
+        
+        // Don't fail the test if some files fail - just report statistics
+        if total_files == 0 {
+            panic!("No .yrp files found in replay directory");
+        }
     }
 }

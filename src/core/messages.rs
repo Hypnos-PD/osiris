@@ -206,6 +206,26 @@ pub fn parse_packet(data: &[u8]) -> (MsgType, &[u8]) {
     (MsgType::from(id), &data[1..])
 }
 
+/// Parse a replay packet that may be wrapped in STOC_GAME_MSG container
+/// Returns (container_id, msg_type, payload)
+pub fn parse_replay_packet(data: &[u8]) -> (Option<u8>, MsgType, &[u8]) {
+    if data.is_empty() { return (None, MsgType::Unknown(0), data); }
+    
+    // Check if this is a STOC_GAME_MSG container (id = 1)
+    let container_id = data[0];
+    if container_id == 1 { // STOC_GAME_MSG
+        if data.len() >= 2 {
+            let msg_id = data[1];
+            (Some(container_id), MsgType::from(msg_id), &data[2..])
+        } else {
+            (Some(container_id), MsgType::Unknown(0), &data[1..])
+        }
+    } else {
+        // Not a container, treat first byte as message ID directly
+        (None, MsgType::from(container_id), &data[1..])
+    }
+}
+
 // Payload parsers for some important message types
 use std::io::Cursor;
 use byteorder::{LittleEndian, ReadBytesExt};
@@ -213,25 +233,24 @@ use byteorder::{LittleEndian, ReadBytesExt};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MsgStart {
     pub player_type: u8,
+    pub duel_rule: u8,
     pub lp: [u32; 2],
     pub deck_count: [u16; 2],
     pub extra_count: [u16; 2],
-    pub hand_count: [u16; 2],
 }
 
 impl MsgStart {
     pub fn parse(payload: &[u8]) -> Option<MsgStart> {
         let mut cursor = Cursor::new(payload);
         let player_type = cursor.read_u8().ok()?;
+        let duel_rule = cursor.read_u8().ok()?;
         let lp0 = cursor.read_u32::<LittleEndian>().ok()?;
         let lp1 = cursor.read_u32::<LittleEndian>().ok()?;
         let d0 = cursor.read_u16::<LittleEndian>().ok()?;
         let d1 = cursor.read_u16::<LittleEndian>().ok()?;
         let e0 = cursor.read_u16::<LittleEndian>().ok()?;
         let e1 = cursor.read_u16::<LittleEndian>().ok()?;
-        let h0 = cursor.read_u16::<LittleEndian>().ok()?;
-        let h1 = cursor.read_u16::<LittleEndian>().ok()?;
-        Some(MsgStart { player_type, lp: [lp0, lp1], deck_count: [d0, d1], extra_count: [e0, e1], hand_count: [h0, h1] })
+        Some(MsgStart { player_type, duel_rule, lp: [lp0, lp1], deck_count: [d0, d1], extra_count: [e0, e1] })
     }
 }
 
@@ -360,6 +379,115 @@ impl MsgChaining {
         let desc = cursor.read_i32::<LittleEndian>().ok()?;
         let ctype = cursor.read_u8().ok()?;
         Some(MsgChaining { code, src_player, src_loc, src_seq, src_sub, trg_player, trg_loc, trg_seq, desc, ctype })
+    }
+}
+
+/// Retry message: no payload
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgRetry;
+
+impl MsgRetry {
+    pub fn parse(_payload: &[u8]) -> Option<MsgRetry> {
+        Some(MsgRetry)
+    }
+}
+
+/// Win message: player, reason
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgWin { pub player: u8, pub reason: u8 }
+
+impl MsgWin {
+    pub fn parse(payload: &[u8]) -> Option<MsgWin> {
+        let mut cursor = Cursor::new(payload);
+        let player = cursor.read_u8().ok()?;
+        let reason = cursor.read_u8().ok()?;
+        Some(MsgWin { player, reason })
+    }
+}
+
+/// Hint message: type, player, data
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgHint { pub hint_type: u8, pub player: u8, pub data: i32 }
+
+impl MsgHint {
+    pub fn parse(payload: &[u8]) -> Option<MsgHint> {
+        let mut cursor = Cursor::new(payload);
+        let hint_type = cursor.read_u8().ok()?;
+        let player = cursor.read_u8().ok()?;
+        let data = cursor.read_i32::<LittleEndian>().ok()?;
+        Some(MsgHint { hint_type, player, data })
+    }
+}
+
+/// Waiting message: no payload
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgWaiting;
+
+impl MsgWaiting {
+    pub fn parse(_payload: &[u8]) -> Option<MsgWaiting> {
+        Some(MsgWaiting)
+    }
+}
+
+/// Update Data message: flag
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgUpdateData { pub flag: u8 }
+
+impl MsgUpdateData {
+    pub fn parse(payload: &[u8]) -> Option<MsgUpdateData> {
+        let mut cursor = Cursor::new(payload);
+        let flag = cursor.read_u8().ok()?;
+        Some(MsgUpdateData { flag })
+    }
+}
+
+/// Update Card message: flag, code
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgUpdateCard { pub flag: u8, pub code: u32 }
+
+impl MsgUpdateCard {
+    pub fn parse(payload: &[u8]) -> Option<MsgUpdateCard> {
+        let mut cursor = Cursor::new(payload);
+        let flag = cursor.read_u8().ok()?;
+        let code = cursor.read_i32::<LittleEndian>().ok()? as u32;
+        Some(MsgUpdateCard { flag, code })
+    }
+}
+
+/// Request Deck message: no payload
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgRequestDeck;
+
+impl MsgRequestDeck {
+    pub fn parse(_payload: &[u8]) -> Option<MsgRequestDeck> {
+        Some(MsgRequestDeck)
+    }
+}
+
+/// Show Hint message: string
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgShowHint { pub message: String }
+
+impl MsgShowHint {
+    pub fn parse(payload: &[u8]) -> Option<MsgShowHint> {
+        // Convert UTF-16 string to Rust String
+        let utf16_bytes: Vec<u16> = payload
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .take_while(|&c| c != 0) // Stop at null terminator
+            .collect();
+        let message = String::from_utf16_lossy(&utf16_bytes);
+        Some(MsgShowHint { message })
+    }
+}
+
+/// Refresh Deck message: no payload
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgRefreshDeck;
+
+impl MsgRefreshDeck {
+    pub fn parse(_payload: &[u8]) -> Option<MsgRefreshDeck> {
+        Some(MsgRefreshDeck)
     }
 }
 
