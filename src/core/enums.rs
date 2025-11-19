@@ -97,7 +97,7 @@ bitflags! {
 
 // Location flags (LOCATION_* in C++)
 bitflags! {
-    #[derive(Clone)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct Location: u32 {
         const DECK = 0x1; // LOCATION_DECK
         const HAND = 0x2; // LOCATION_HAND

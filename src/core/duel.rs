@@ -23,6 +23,7 @@ pub struct DuelData {
     pub state: ProcessorState,
     pub turn: u32,
     pub turn_player: u8,
+    pub lp: [u32; 2],
     pub effects: Vec<Effect>,
     pub triggered_effects: Vec<EffectId>,
     pub database: std::sync::Arc<std::sync::Mutex<Database>>,
@@ -120,33 +121,81 @@ pub struct Duel {
 }
 
 impl Duel {
+    /// Load a deck for a player, clearing existing cards and creating new ones with proper location assignment.
+    /// Main deck cards go to LOCATION_DECK, extra deck cards go to LOCATION_EXTRA.
+    pub fn load_deck(&mut self, player: u8, main: &[u32], extra: &[u32]) {
+        let mut data = self.data.lock().unwrap();
+        
+        // Clear existing decks for this player
+        data.field.deck[player as usize].clear();
+        data.field.extra[player as usize].clear();
+        
+        // Create main deck cards
+        for &code in main.iter() {
+            drop(data);
+            let card_id = self.create_card(code, player);
+            data = self.data.lock().unwrap();
+            
+            // Card is already in deck from create_card, just ensure location is correct
+            if let Some(card) = data.cards.get_mut(card_id.0 as usize) {
+                card.location = Location::DECK;
+            }
+        }
+        
+        // Create extra deck cards
+        for &code in extra.iter() {
+            drop(data);
+            let card_id = self.create_card(code, player);
+            data = self.data.lock().unwrap();
+            
+            // Move card from deck to extra deck
+            // First remove from deck
+            if let Some(pos) = data.field.deck[player as usize].iter().position(|&id| id == card_id) {
+                data.field.deck[player as usize].remove(pos);
+            }
+            
+            // Then add to extra deck
+            let player_idx = player as usize;
+            let seq = data.field.extra[player_idx].len() as u8;
+            data.field.add_card(player, Location::EXTRA, card_id, seq);
+            
+            // Update card location and sequence
+            if let Some(card) = data.cards.get_mut(card_id.0 as usize) {
+                card.location = Location::EXTRA;
+                card.sequence = seq;
+            }
+        }
+    }
+
     /// Load a replay into the duel state (seed and decks). This is a stub and will not handle action replaying.
     pub fn load_replay(&mut self, replay: crate::core::replay::Replay) {
         let mut data = self.data.lock().unwrap();
         // Reset RNG using the header seed
         data.random = Mt19937::new(replay.header.seed);
-        // Clear current decks and create cards according to replay decks
+        // Reset processor state to Start
+        data.state = ProcessorState::Start;
+        // Reset turn counter
+        data.turn = 0;
+        // Set starting LP according to replay parameters if provided
+        let mut start_lp = 8000u32;
+        if replay.params.start_lp > 0 {
+            start_lp = replay.params.start_lp as u32;
+        }
+        data.lp = [start_lp, start_lp];
+        drop(data);
+        
+        // Load decks for each player
         for (p_idx, deck) in replay.decks.iter().enumerate() {
             let p = p_idx as u8;
-            data.field.deck[p_idx].clear();
-            for &code in deck.main.iter() {
-                // create_card will push into deck
-                drop(data);
-                let _ = self.create_card(code, p);
-                data = self.data.lock().unwrap();
-            }
-            // extras (not handled specially in field for now)
-            for &code in deck.extra.iter() {
-                drop(data);
-                let _ = self.create_card(code, p);
-                data = self.data.lock().unwrap();
-            }
+            self.load_deck(p, &deck.main, &deck.extra);
         }
     }
     /// Handle Start processing step (shuffle & initial draw)
     fn process_start(&mut self) -> bool {
         let mut data = self.data.lock().unwrap();
         println!("Duel Start");
+        // Initialize LP to defaults for a duel start in case not set by load_replay
+        data.lp = [8000, 8000];
         for p in 0..2u8 {
             self.shuffle_deck_internal(&mut data, p);
         }
@@ -161,7 +210,13 @@ impl Duel {
     fn process_turn_change(&mut self) -> bool {
         let mut data = self.data.lock().unwrap();
         data.turn += 1;
-        data.turn_player = (data.turn_player + 1) % 2;
+        // On the first turn, choose starting player based on RNG so it matches C++'s selection.
+        if data.turn == 1 {
+            let v = data.random.gen_u32();
+            data.turn_player = (v % 2) as u8;
+        } else {
+            data.turn_player = (data.turn_player + 1) % 2;
+        }
         data.state = ProcessorState::Draw;
         true
     }
@@ -332,6 +387,7 @@ impl Duel {
             state: ProcessorState::Start,
             turn: 0,
             turn_player: 0,
+            lp: [8000, 8000],
             effects: Vec::new(),
             triggered_effects: Vec::new(),
                 database: db_arc,
@@ -1250,6 +1306,144 @@ mod tests {
         } else {
             panic!("card consistently missing");
         }
+    }
+
+    #[test]
+    fn test_replay_state_initialization() {
+        use crate::core::replay::{Replay, ReplayHeader, DeckArray};
+        
+        // Create a mock replay with specific seed and decks
+        let header = ReplayHeader {
+            id: crate::core::replay::REPLAY_ID_YRP1,
+            version: 0x12d0,
+            flag: 0,
+            seed: 12345, // Specific seed for deterministic testing
+            datasize: 0,
+            start_time: 0,
+            props: [0u8; 8],
+        };
+        
+        let decks = vec![
+            DeckArray {
+                main: vec![1001, 1002, 1003], // Player 0 main deck
+                extra: vec![2001, 2002],       // Player 0 extra deck
+            },
+            DeckArray {
+                main: vec![3001, 3002],        // Player 1 main deck
+                extra: vec![4001],             // Player 1 extra deck
+            },
+        ];
+        
+        let replay = Replay {
+            header,
+            players: vec!["Player0".to_string(), "Player1".to_string()],
+            params: crate::core::replay::DuelParameters::default(),
+            decks,
+            script_name: None,
+            data: Vec::new(),
+            actions: Vec::new(),
+            packet_data: Vec::new(),
+            decompressed_ok: true,
+        };
+        
+        // Create duel and load replay
+        let mut duel = Duel::new(999); // Initial seed different from replay
+        duel.load_replay(replay);
+        
+        // Verify state after replay loading
+        let mut data = duel.data.lock().unwrap();
+        
+        // Check RNG was initialized with replay seed by comparing with a fresh instance
+        let mut test_rng = Mt19937::new(12345);
+        let expected_first = test_rng.gen_u32();
+        
+        // Test the RNG with the mutable reference
+        let actual_first = data.random.gen_u32();
+        assert_eq!(actual_first, expected_first, "RNG should produce deterministic output based on replay seed");
+        
+        // Check processor state was reset
+        assert_eq!(data.state, ProcessorState::Start, "Processor state should be reset to Start");
+        
+        // Check turn counter was reset
+        assert_eq!(data.turn, 0, "Turn counter should be reset to 0");
+        
+        // Verify deck contents
+        assert_eq!(data.field.deck[0].len(), 3, "Player 0 should have 3 main deck cards");
+        assert_eq!(data.field.deck[1].len(), 2, "Player 1 should have 2 main deck cards");
+        
+        // Verify extra deck contents
+        assert_eq!(data.field.extra[0].len(), 2, "Player 0 should have 2 extra deck cards");
+        assert_eq!(data.field.extra[1].len(), 1, "Player 1 should have 1 extra deck card");
+        
+        // Verify card codes in decks
+        let check_card_code = |player: usize, location: Location, expected_codes: &[u32]| {
+            let cards = match location {
+                Location::DECK => &data.field.deck[player],
+                Location::EXTRA => &data.field.extra[player],
+                _ => panic!("Unexpected location"),
+            };
+            
+            for (i, &expected_code) in expected_codes.iter().enumerate() {
+                if i < cards.len() {
+                    let card_id = cards[i];
+                    if let Some(card) = data.get_card(card_id) {
+                        assert_eq!(card.code, expected_code, "Card {} in {:?} should have code {}", i, location, expected_code);
+                        assert_eq!(card.owner, player as u8, "Card should belong to player {}", player);
+                        assert!(card.location.contains(location), "Card should be in {:?}", location);
+                    } else {
+                        panic!("Card with id {} not found", card_id.0);
+                    }
+                }
+            }
+        };
+        
+        check_card_code(0, Location::DECK, &[1001, 1002, 1003]);
+        check_card_code(0, Location::EXTRA, &[2001, 2002]);
+        check_card_code(1, Location::DECK, &[3001, 3002]);
+        check_card_code(1, Location::EXTRA, &[4001]);
+    }
+
+    #[test]
+    fn test_simulation_initial_hand() {
+        use std::path::PathBuf;
+        use crate::core::replay::Replay;
+
+        // Candidate paths to find the test replay file relative to the crate working dir
+        let candidates = vec![
+            PathBuf::from("../test/replay/2024-10-01 22-04-42(1).yrp"),
+            PathBuf::from("../../test/replay/2024-10-01 22-04-42(1).yrp"),
+        ];
+        let mut found: Option<PathBuf> = None;
+        for p in candidates.iter() {
+            if p.exists() {
+                found = Some(p.clone());
+                break;
+            }
+        }
+        let replay_path = found.expect("Could not locate test replay file; adjust path as necessary");
+        println!("Using replay file: {:?}", replay_path);
+
+        let r = Replay::open(&replay_path).expect("Failed to parse replay file");
+        // Create duel and load replay
+        let mut duel = Duel::new(42);
+        duel.load_replay(r);
+
+        // Run the processing loop until it waits on input at Main1
+        let mut steps = 0;
+        while duel.process() && steps < 100 {
+            steps += 1;
+        }
+
+        let data = duel.data.lock().unwrap();
+        // Turn player should have drawn one extra card (6), other player has 5
+        let tp = data.turn_player as usize;
+        let other = 1 - tp;
+        println!("tp={} hand sizes: {} {}", tp, data.field.hand[tp].len(), data.field.hand[other].len());
+        assert!(data.field.hand[tp].len() == 6, "Turn player should have 6 cards after initial draw");
+        assert!(data.field.hand[other].len() == 5, "Non-turn player should have 5 cards after initial draw");
+        assert_eq!(data.state, ProcessorState::Main1);
+        assert_eq!(data.lp[0], 8000);
+        assert_eq!(data.lp[1], 8000);
     }
 
     #[test]

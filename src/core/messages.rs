@@ -1,4 +1,66 @@
 // Message protocol definitions — derived from YGOPRO common.h (MSG_* constants)
+
+/// STOC (Server To Client) network protocol message types
+/// These are the network layer containers that wrap actual game messages
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StocType {
+    GameMsg, // Contains actual MSG_* game messages (id = 0x01)
+    ErrorMsg, // STOC_ERROR_MSG
+    SelectHand, // STOC_SELECT_HAND
+    SelectTp, // STOC_SELECT_TP
+    HandResult, // STOC_HAND_RESULT
+    TpResult, // STOC_TP_RESULT
+    ChangeSide, // STOC_CHANGE_SIDE
+    WaitingSide, // STOC_WAITING_SIDE
+    DeckCount, // STOC_DECK_COUNT
+    CreateGame, // STOC_CREATE_GAME
+    JoinGame, // STOC_JOIN_GAME
+    TypeChange, // STOC_TYPE_CHANGE
+    LeaveGame, // STOC_LEAVE_GAME
+    DuelStart, // STOC_DUEL_START
+    DuelEnd, // STOC_DUEL_END
+    Replay, // STOC_REPLAY
+    TimeLimit, // STOC_TIME_LIMIT
+    Chat, // STOC_CHAT
+    HsPlayerEnter, // STOC_HS_PLAYER_ENTER
+    HsPlayerChange, // STOC_HS_PLAYER_CHANGE
+    HsWatchChange, // STOC_HS_WATCH_CHANGE
+    TeammateSurrender, // STOC_TEAMMATE_SURRENDER
+    FieldFinish, // STOC_FIELD_FINISH
+    Unknown(u8),
+}
+
+impl From<u8> for StocType {
+    fn from(id: u8) -> Self {
+        match id {
+            0x01 => StocType::GameMsg,
+            0x02 => StocType::ErrorMsg,
+            0x03 => StocType::SelectHand,
+            0x04 => StocType::SelectTp,
+            0x05 => StocType::HandResult,
+            0x06 => StocType::TpResult,
+            0x07 => StocType::ChangeSide,
+            0x08 => StocType::WaitingSide,
+            0x09 => StocType::DeckCount,
+            0x11 => StocType::CreateGame,
+            0x12 => StocType::JoinGame,
+            0x13 => StocType::TypeChange,
+            0x14 => StocType::LeaveGame,
+            0x15 => StocType::DuelStart,
+            0x16 => StocType::DuelEnd,
+            0x17 => StocType::Replay,
+            0x18 => StocType::TimeLimit,
+            0x19 => StocType::Chat,
+            0x20 => StocType::HsPlayerEnter,
+            0x21 => StocType::HsPlayerChange,
+            0x22 => StocType::HsWatchChange,
+            0x23 => StocType::TeammateSurrender,
+            0x30 => StocType::FieldFinish,
+            _ => StocType::Unknown(id),
+        }
+    }
+}
+
 #[repr(u8)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MsgType {
@@ -489,5 +551,41 @@ impl MsgRefreshDeck {
     pub fn parse(_payload: &[u8]) -> Option<MsgRefreshDeck> {
         Some(MsgRefreshDeck)
     }
+}
+
+/// Parse STOC (Server To Client) network packets
+/// This function properly unwraps STOC containers to reveal the actual game messages inside
+pub fn parse_stoc_packet(data: &[u8]) -> (StocType, MsgType, &[u8]) {
+    if data.is_empty() { 
+        return (StocType::Unknown(0), MsgType::Unknown(0), data); 
+    }
+    
+    // First byte is the STOC message type
+    let stoc_type = StocType::from(data[0]);
+    
+    match stoc_type {
+        StocType::GameMsg => {
+            // STOC_GAME_MSG container: contains actual MSG_* game messages
+            // The structure is: [STOC_TYPE=0x01] [MSG_TYPE] [payload...]
+            if data.len() >= 2 {
+                let msg_id = data[1];
+                (stoc_type, MsgType::from(msg_id), &data[2..])
+            } else {
+                // Invalid container - not enough data
+                (stoc_type, MsgType::Unknown(0), &data[1..])
+            }
+        }
+        _ => {
+            // For all other STOC types, the first byte is the STOC type
+            // and the rest is payload (no MSG_* message inside)
+            (stoc_type, MsgType::Unknown(0), &data[1..])
+        }
+    }
+}
+
+/// Enhanced replay packet parsing that uses STOC protocol unwrapping
+/// This is the recommended function for parsing replay files
+pub fn parse_replay_packet_enhanced(data: &[u8]) -> (StocType, MsgType, &[u8]) {
+    parse_stoc_packet(data)
 }
 

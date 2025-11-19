@@ -421,8 +421,8 @@ mod tests {
             assert!(r.decks.len() >= 1, "Decks should have been parsed when decompressed_ok is true");
         }
 
-        // parse first N packets and print their types
-        use crate::core::messages::{parse_packet, MsgType, MsgStart, MsgNewTurn, MsgMove, MsgSummoning, MsgSpSummoning, MsgChaining};
+        // parse first N packets and print their types using STOC protocol unwrapping
+        use crate::core::messages::{parse_replay_packet_enhanced, StocType, MsgType, MsgStart, MsgNewTurn, MsgMove, MsgSummoning, MsgSpSummoning, MsgChaining};
         let n = r.packet_data.len();
         let mut seen: Vec<MsgType> = Vec::new();
         let mut move_count = 0usize;
@@ -430,8 +430,8 @@ mod tests {
         let mut spsummon_count = 0usize;
         let mut chain_count = 0usize;
         for pkt in r.packet_data.iter().take(n) {
-            let (msg, payload) = parse_packet(pkt);
-            println!("Packet msg: {:?} payload len {}", msg, payload.len());
+            let (stoc_type, msg, payload) = parse_replay_packet_enhanced(pkt);
+            println!("Packet STOC: {:?} MSG: {:?} payload len {}", stoc_type, msg, payload.len());
             match msg {
                 MsgType::Start => {
                     if let Some(s) = MsgStart::parse(payload) {
@@ -538,15 +538,15 @@ mod tests {
                                 println!("  Successfully opened replay");
                                 println!("  Parsed packets: {}", r.packet_data.len());
                                 
-                                // Parse packets and examine ID 0 messages
-                                use crate::core::messages::{parse_replay_packet, MsgType, MsgStart};
+                                // Parse packets and examine ID 0 messages using STOC protocol unwrapping
+                                use crate::core::messages::{parse_replay_packet_enhanced, StocType, MsgType, MsgStart};
                                 
                                 let mut id0_count = 0usize;
                                 let mut id0_with_18_bytes = 0usize;
                                 let mut parsed_as_start = 0usize;
                                 
                                 for (i, pkt) in r.packet_data.iter().enumerate() {
-                                    let (_container, msg, payload) = parse_replay_packet(pkt);
+                                    let (stoc_type, msg, payload) = parse_replay_packet_enhanced(pkt);
                                     
                                     if let MsgType::Unknown(0) = msg {
                                         id0_count += 1;
@@ -637,8 +637,8 @@ mod tests {
                                 println!("  Replay Action Data Size: {} bytes", r.actions.len());
                                 println!("  Parsed packets: {}", r.packet_data.len());
                                 
-                                // Parse packets and count message types
-                                use crate::core::messages::{parse_replay_packet, MsgType, MsgStart, MsgNewTurn, MsgMove, MsgSummoning, MsgSpSummoning, MsgChaining, MsgRetry, MsgWin, MsgHint, MsgWaiting, MsgUpdateData, MsgUpdateCard, MsgRequestDeck, MsgShowHint, MsgRefreshDeck};
+                                // Parse packets and count message types using STOC protocol unwrapping
+                                use crate::core::messages::{parse_replay_packet_enhanced, StocType, MsgType, MsgStart, MsgNewTurn, MsgMove, MsgSummoning, MsgSpSummoning, MsgChaining, MsgRetry, MsgWin, MsgHint, MsgWaiting, MsgUpdateData, MsgUpdateCard, MsgRequestDeck, MsgShowHint, MsgRefreshDeck};
                                 
                                 let mut move_count = 0usize;
                                 let mut summon_count = 0usize;
@@ -658,12 +658,21 @@ mod tests {
                                 let mut unknown_count = 0usize;
                                 let mut file_unknown_ids: HashMap<u8, u32> = HashMap::new();
                                 let mut container_count = 0usize;
+                                let mut file_packet_count = 0usize;
                                 
                                 for pkt in &r.packet_data {
-                                    let (container, msg, payload) = parse_replay_packet(pkt);
-                                    if container.is_some() {
+                                    let (stoc_type, msg, payload) = parse_replay_packet_enhanced(pkt);
+                                    if let StocType::GameMsg = stoc_type {
                                         container_count += 1;
                                     }
+                                    
+                                    // Debug: Print first few packets to understand STOC unwrapping
+                                    if file_packet_count < 5 {
+                                        println!("  Packet {}: STOC={:?} MSG={:?} payload_len={}", file_packet_count, stoc_type, msg, payload.len());
+                                        println!("    Full packet hex: {:02x?}", pkt);
+                                        file_packet_count += 1;
+                                    }
+                                    
                                     match msg {
                                         MsgType::Start => {
                                             if MsgStart::parse(payload).is_some() {
@@ -762,8 +771,9 @@ mod tests {
                                             *global_message_counts.entry(format!("UNKNOWN_{}", id)).or_insert(0) += 1;
                                             
                                             // Debug: Check if this is actually MSG_START with wrong ID
-                                            if (id == 255 || id == 0) && payload.len() == 18 {
-                                                println!("  DEBUG: Found potential MSG_START with ID {}, payload length: {}", id, payload.len());
+                                            // With STOC unwrapping, we should no longer see Unknown(255) messages
+                                            if id == 255 && payload.len() == 18 {
+                                                println!("  DEBUG: Found Unknown(255) with 18 bytes - this should be STOC_GAME_MSG container");
                                                 // Try to parse as MSG_START to verify
                                                 if let Some(msg_start) = MsgStart::parse(payload) {
                                                     println!("  DEBUG: Successfully parsed as MSG_START: player_type={}, duel_rule={}, lp={:?}, deck_count={:?}, extra_count={:?}", 
