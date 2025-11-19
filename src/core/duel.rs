@@ -1,18 +1,19 @@
 use crate::core::card::Card;
 use crate::core::enums::Location;
 use crate::core::field::Field;
+use crate::core::mtrandom::Mt19937;
 use crate::core::types::CardId;
 
 /// Duel acts as the arena holding cards and the field.
 pub struct Duel {
     pub cards: Vec<Card>,
     pub field: Field,
-    pub random_seed: u32,
+    pub random: Mt19937,
 }
 
 impl Duel {
     pub fn new(seed: u32) -> Self {
-        Duel { cards: Vec::new(), field: Field::new(), random_seed: seed }
+        Duel { cards: Vec::new(), field: Field::new(), random: Mt19937::new(seed) }
     }
 
     /// Create a card in the arena and return its CardId handle.
@@ -61,16 +62,74 @@ impl Duel {
             return false;
         }
         // Update card internal state
-        // Clone target location for reuse (Location may not be Copy)
-        let target_loc_clone = crate::core::enums::Location::from_bits_truncate(target_loc.bits());
+        // Precompute which type of location we're adding to (we'll move target_loc into add_card below)
+        let is_deck = target_loc.contains(Location::DECK);
+        let is_hand = target_loc.contains(Location::HAND);
+        let is_grave = target_loc.contains(Location::GRAVE);
+        let is_removed = target_loc.contains(Location::REMOVED);
+        let is_extra = target_loc.contains(Location::EXTRA);
         if let Some(cmut) = self.get_card_mut(card_id) {
             cmut.controller = target_player;
-            cmut.location = crate::core::enums::Location::from_bits_truncate(target_loc_clone.bits());
+            cmut.location = crate::core::enums::Location::from_bits_truncate(target_loc.bits());
             cmut.sequence = target_seq;
         }
         // Add to new location
-        self.field.add_card(target_player, target_loc_clone, card_id, target_seq);
+        self.field.add_card(target_player, target_loc, card_id, target_seq);
+        // If added to a stack (deck/hand/grave/remove/extra) update the sequence to the final appended index.
+        if is_deck {
+            let idx = (self.field.deck[target_player as usize].len() - 1) as u8;
+            if let Some(cmut) = self.get_card_mut(card_id) {
+                cmut.sequence = idx;
+            }
+        } else if is_hand {
+            let idx = (self.field.hand[target_player as usize].len() - 1) as u8;
+            if let Some(cmut) = self.get_card_mut(card_id) {
+                cmut.sequence = idx;
+            }
+        } else if is_grave {
+            let idx = (self.field.grave[target_player as usize].len() - 1) as u8;
+            if let Some(cmut) = self.get_card_mut(card_id) {
+                cmut.sequence = idx;
+            }
+        } else if is_removed {
+            let idx = (self.field.remove[target_player as usize].len() - 1) as u8;
+            if let Some(cmut) = self.get_card_mut(card_id) {
+                cmut.sequence = idx;
+            }
+        } else if is_extra {
+            let idx = (self.field.extra[target_player as usize].len() - 1) as u8;
+            if let Some(cmut) = self.get_card_mut(card_id) {
+                cmut.sequence = idx;
+            }
+        }
         true
+    }
+
+    /// Shuffle the player's deck using Fisher-Yates and the duel's MT19937 RNG.
+    pub fn shuffle_deck(&mut self, player: u8) {
+        let p = player as usize;
+        let deck = &mut self.field.deck[p];
+        if deck.len() <= 1 {
+            return;
+        }
+        for i in (1..deck.len()).rev() {
+            let j = (self.random.gen_u32() as usize) % (i + 1);
+            deck.swap(i, j);
+        }
+    }
+
+    /// Draw `count` cards from player's deck to their hand (append to hand).
+    pub fn draw(&mut self, player: u8, count: u32) {
+        for _ in 0..count {
+            let p = player as usize;
+            if self.field.deck[p].is_empty() {
+                break;
+            }
+            // Top card is last element
+            let card_id = *self.field.deck[p].last().unwrap();
+            // Move to hand (move_card will remove from deck)
+            let _ = self.move_card(card_id, player, Location::HAND, 0);
+        }
     }
 
     pub fn get_card(&self, id: CardId) -> Option<&Card> {
@@ -147,5 +206,36 @@ mod tests {
         assert_eq!(d.field.mzone[0][2].unwrap(), id);
         // ensure hand no longer contains the card
         assert!(!d.field.hand[0].contains(&id));
+    }
+
+    #[test]
+    fn test_shuffle_deck_and_draw() {
+        let mut d = Duel::new(42);
+        // create 10 cards in player 0 deck
+        for i in 0..10 {
+            d.create_card(i + 1, 0);
+        }
+        let original: Vec<_> = d.field.deck[0].clone();
+        d.shuffle_deck(0);
+        let shuffled: Vec<_> = d.field.deck[0].clone();
+        assert_eq!(original.len(), shuffled.len());
+        // Assert that the order changed in at least one position (probabilistic but extremely unlikely to be same)
+        let mut same = true;
+        for i in 0..original.len() {
+            if original[i] != shuffled[i] {
+                same = false;
+                break;
+            }
+        }
+        assert!(!same, "shuffle should change deck order");
+
+        // test draw
+        let mut d2 = Duel::new(100);
+        for i in 0..5 {
+            d2.create_card(i + 1, 0);
+        }
+        d2.draw(0, 2);
+        assert_eq!(d2.field.hand[0].len(), 2);
+        assert_eq!(d2.field.deck[0].len(), 3);
     }
 }

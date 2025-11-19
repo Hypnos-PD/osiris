@@ -1,0 +1,83 @@
+use core::num::Wrapping;
+
+/// Mersenne Twister 19937 implementation matching C++ std::mt19937 output.
+/// Implements the standard initialization and gen_u32 output.
+pub struct Mt19937 {
+    mt: [u32; 624],
+    mti: usize,
+}
+
+impl Mt19937 {
+    const N: usize = 624;
+    const M: usize = 397;
+    const MATRIX_A: u32 = 0x9908b0df;
+    const UPPER_MASK: u32 = 0x80000000;
+    const LOWER_MASK: u32 = 0x7fffffff;
+
+    pub fn new(seed: u32) -> Self {
+        let mut mt = [0u32; Self::N];
+        mt[0] = seed;
+        for i in 1..Self::N {
+            // mt[i] = (1812433253 * (mt[i-1] xor (mt[i-1] >> 30)) + i)
+            // use wrapping to replicate behaviour
+            let prev = Wrapping(mt[i - 1]);
+            let mut val = prev ^ (prev >> 30);
+            val = val * Wrapping(1812433253u32);
+            val += Wrapping(i as u32);
+            mt[i] = val.0;
+        }
+        Mt19937 { mt, mti: Self::N }
+    }
+
+    pub fn gen_u32(&mut self) -> u32 {
+        if self.mti >= Self::N {
+            // generate N words at one time
+            let mut kk = 0usize;
+            while kk < Self::N - Self::M {
+                let y = (self.mt[kk] & Self::UPPER_MASK) | (self.mt[kk + 1] & Self::LOWER_MASK);
+                self.mt[kk] = self.mt[kk + Self::M] ^ (y >> 1) ^ (if (y & 1) != 0 { Self::MATRIX_A } else { 0 });
+                kk += 1;
+            }
+            while kk < Self::N - 1 {
+                let y = (self.mt[kk] & Self::UPPER_MASK) | (self.mt[kk + 1] & Self::LOWER_MASK);
+                // compute index accounting for wrap-around (kk + M - N), done safely using isize
+                let idx = (kk as isize + Self::M as isize - Self::N as isize) as usize;
+                self.mt[kk] = self.mt[idx] ^ (y >> 1) ^ (if (y & 1) != 0 { Self::MATRIX_A } else { 0 });
+                kk += 1;
+            }
+            let y = (self.mt[Self::N - 1] & Self::UPPER_MASK) | (self.mt[0] & Self::LOWER_MASK);
+            self.mt[Self::N - 1] = self.mt[Self::M - 1] ^ (y >> 1) ^ (if (y & 1) != 0 { Self::MATRIX_A } else { 0 });
+            self.mti = 0;
+        }
+        let mut y = self.mt[self.mti];
+        self.mti += 1;
+
+        // Tempering
+        y ^= y >> 11;
+        y ^= (y << 7) & 0x9d2c5680;
+        y ^= (y << 15) & 0xefc60000;
+        y ^= y >> 18;
+        y
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Mt19937;
+
+    #[test]
+    fn mt19937_matches_reference() {
+        // Known sequence for a seed 5489 from reference implementation
+        // First 10 outputs of MT19937 with seed 5489 (from original RFC):
+        // 3499211612, 581869302, 3890346734, 3586334585, 545404204,
+        // 4161255391, 3922919429, 949333985, 2715962298, 1323567403
+        let mut mt = Mt19937::new(5489);
+        let expected: [u32; 10] = [
+            3499211612, 581869302, 3890346734, 3586334585, 545404204,
+            4161255391, 3922919429, 949333985, 2715962298, 1323567403,
+        ];
+        for &e in expected.iter() {
+            assert_eq!(mt.gen_u32(), e);
+        }
+    }
+}
