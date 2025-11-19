@@ -10,3 +10,4 @@ pub mod scripting;
 pub mod group;
 pub mod event;
 pub mod database;
+pub mod replay;
