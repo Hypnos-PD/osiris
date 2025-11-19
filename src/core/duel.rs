@@ -120,6 +120,53 @@ pub struct Duel {
 }
 
 impl Duel {
+    /// Handle Start processing step (shuffle & initial draw)
+    fn process_start(&mut self) -> bool {
+        let mut data = self.data.lock().unwrap();
+        println!("Duel Start");
+        for p in 0..2u8 {
+            self.shuffle_deck_internal(&mut data, p);
+        }
+        for p in 0..2u8 {
+            self.draw_internal(&mut data, p, 5);
+        }
+        data.state = ProcessorState::TurnChange;
+        true
+    }
+
+    /// Handle turn change: increment turn, swap player, and go to Draw phase
+    fn process_turn_change(&mut self) -> bool {
+        let mut data = self.data.lock().unwrap();
+        data.turn += 1;
+        data.turn_player = (data.turn_player + 1) % 2;
+        data.state = ProcessorState::Draw;
+        true
+    }
+
+    /// Handle draw phase
+    fn process_draw_phase(&mut self) -> bool {
+        let turn_player = {
+            let data = self.data.lock().unwrap();
+            data.turn_player
+        };
+        // Draw a card for the current player; use `draw` which does lock management
+        self.draw(turn_player, 1);
+        // Raise EVENT_DRAW
+        let lua = &self.lua;
+        let data_arc = self.data.clone();
+        Duel::raise_event_static(lua, data_arc, crate::core::enums::EVENT_DRAW, None, turn_player, None);
+        // Go to Main1 phase next
+        let mut data = self.data.lock().unwrap();
+        data.state = ProcessorState::Main1;
+        true
+    }
+
+    /// Handle main phases (Main1/Main2)
+    fn process_main_phase(&mut self, _phase: crate::core::enums::Phase) -> bool {
+        println!("Entering Main Phase");
+        // For now, just wait for player input (return false to pause processing)
+        false
+    }
     pub fn new(seed: u32) -> Self {
         // default to creating an in-memory DB
         let db = Database::open_in_memory().expect("Failed to open default database");
@@ -404,6 +451,10 @@ pub enum ProcessorState {
     Draw,
     Standby,
     Main1,
+    BattleStart,
+    BattleStep,
+    Damage,
+    DamageCal,
     Battle,
     Main2,
     End,
@@ -413,42 +464,61 @@ pub enum ProcessorState {
 impl Duel {
     /// Process the duel state machine for one cycle: returns true to continue, false to stop.
     pub fn process(&mut self) -> bool {
-        let mut data = self.data.lock().unwrap();
-        match data.state {
-            ProcessorState::Start => {
-                println!("Duel Start");
-                // Shuffle and draw initial hands for both players
-                for p in 0..2u8 {
-                    self.shuffle_deck_internal(&mut data, p);
-                }
-                // Draw 5 for each player
-                for p in 0..2u8 {
-                    self.draw_internal(&mut data, p, 5);
-                }
-                data.state = ProcessorState::TurnChange;
-                true
-            }
-            ProcessorState::TurnChange => {
-                data.turn += 1;
-                data.turn_player = (data.turn_player + 1) % 2;
-                data.state = ProcessorState::Draw;
-                true
-            }
-            ProcessorState::Draw => {
-                // Release the lock before calling draw
-                let turn_player = data.turn_player;
+        // Priority: if there is a chain, resolve it before doing anything else
+        {
+            let data = self.data.lock().unwrap();
+            if data.chain.links.len() > 0 {
                 drop(data);
-                self.draw(turn_player, 1);
+                self.resolve_chain();
+                return true;
+            }
+        }
+        // No chain to resolve: handle processor state
+        let state_copy = { let data = self.data.lock().unwrap(); data.state };
+        match state_copy {
+            ProcessorState::Start => self.process_start(),
+            ProcessorState::TurnChange => self.process_turn_change(),
+            ProcessorState::Draw => self.process_draw_phase(),
+            ProcessorState::Standby => {
+                println!("Standby Phase");
+                // For now just move to Main1
                 let mut data = self.data.lock().unwrap();
                 data.state = ProcessorState::Main1;
                 true
             }
-            ProcessorState::Main1 => {
-                println!("Main Phase 1");
-                // Stop processing until player inputs / network interaction
+            ProcessorState::Main1 => self.process_main_phase(crate::core::enums::Phase::MAIN1),
+            ProcessorState::BattleStart => {
+                println!("Battle Start Phase");
                 false
             }
-            _ => false,
+            ProcessorState::BattleStep => {
+                println!("Battle Step Phase");
+                false
+            }
+            ProcessorState::Damage => {
+                println!("Damage Phase");
+                false
+            }
+            ProcessorState::DamageCal => {
+                println!("Damage Calculation Phase");
+                false
+            }
+            ProcessorState::Battle => {
+                println!("Battle Phase");
+                false
+            }
+            ProcessorState::Main2 => self.process_main_phase(crate::core::enums::Phase::MAIN2),
+            ProcessorState::End => {
+                println!("End Phase");
+                // For now go to TurnChange
+                let mut data = self.data.lock().unwrap();
+                data.state = ProcessorState::TurnChange;
+                true
+            }
+            ProcessorState::GameOver => {
+                println!("Game Over");
+                false
+            }
         }
     }
 
@@ -741,8 +811,22 @@ mod tests {
         println!("Initial state: {:?}", data.state);
         assert_eq!(data.state, ProcessorState::Start);
         drop(data);
-        // Run the processor until it pauses
-        while d.process() {}
+        // Step the processor and assert expected state transitions
+        assert!(d.process(), "Start->TurnChange should continue");
+        {
+            let data = d.data.lock().unwrap();
+            assert_eq!(data.state, ProcessorState::TurnChange);
+        }
+        assert!(d.process(), "TurnChange->Draw should continue");
+        {
+            let data = d.data.lock().unwrap();
+            assert_eq!(data.state, ProcessorState::Draw);
+        }
+        assert!(d.process(), "Draw->Main1 should continue");
+        {
+            let data = d.data.lock().unwrap();
+            assert_eq!(data.state, ProcessorState::Main1);
+        }
         // After first full cycle, turn should be > 0
         let data = d.data.lock().unwrap();
         assert!(data.turn > 0);
