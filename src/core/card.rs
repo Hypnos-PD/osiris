@@ -96,10 +96,49 @@ impl UserData for CardId {
             // Register the effect in the DuelData arena and attach to this card
             let data = lua.app_data_ref::<Arc<Mutex<crate::core::duel::DuelData>>>()
                 .expect("DuelData not found in Lua app data");
-            let mut data_guard = data.lock().unwrap();
-            // Copy effect data from userdata and move into arena
+            // Copy effect data from userdata and move into arena by making a fresh Effect instance.
+            // Extract fields from userdata, then build a new Effect with cloned fields and newly created registry keys.
             if let Ok(e) = effect_ud.borrow::<crate::core::effect::Effect>() {
-                let _eid = data_guard.register_effect(e.clone(), Some(*self_));
+                // Recreate registry keys by extracting function and creating a new registry entry for it.
+                let mut cond_key = None;
+                if let Some(k) = &e.condition {
+                    if let Ok(func) = lua.registry_value::<mlua::Function>(k) {
+                        if let Ok(newk) = lua.create_registry_value(func) { cond_key = Some(newk); }
+                    }
+                }
+                let mut cost_key = None;
+                if let Some(k) = &e.cost {
+                    if let Ok(func) = lua.registry_value::<mlua::Function>(k) {
+                        if let Ok(newk) = lua.create_registry_value(func) { cost_key = Some(newk); }
+                    }
+                }
+                let mut target_key = None;
+                if let Some(k) = &e.target {
+                    if let Ok(func) = lua.registry_value::<mlua::Function>(k) {
+                        if let Ok(newk) = lua.create_registry_value(func) { target_key = Some(newk); }
+                    }
+                }
+                let mut op_key = None;
+                if let Some(k) = &e.operation {
+                    if let Ok(func) = lua.registry_value::<mlua::Function>(k) {
+                        if let Ok(newk) = lua.create_registry_value(func) { op_key = Some(newk); }
+                    }
+                }
+                let new_effect = crate::core::effect::Effect {
+                    id: 0,
+                    owner: *self_,
+                    description: e.description,
+                    code: e.code,
+                    type_: e.type_,
+                    range: e.range,
+                    flag: e.flag,
+                    condition: cond_key,
+                    cost: cost_key,
+                    target: target_key,
+                    operation: op_key,
+                };
+                let mut data_guard = data.lock().unwrap();
+                let _eid = data_guard.register_effect(new_effect, Some(*self_));
             }
             Ok(())
         });

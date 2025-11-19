@@ -1,8 +1,8 @@
 use crate::core::types::CardId;
-use mlua::{UserData, UserDataMethods};
+use mlua::{UserData, UserDataMethods, RegistryKey, Function};
 
 /// Basic Effect structure for now
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Effect {
     pub id: u32,
     pub owner: CardId,
@@ -11,11 +11,15 @@ pub struct Effect {
     pub type_: u32,
     pub range: u32,
     pub flag: u32,
+    pub condition: Option<RegistryKey>,
+    pub cost: Option<RegistryKey>,
+    pub target: Option<RegistryKey>,
+    pub operation: Option<RegistryKey>,
 }
 
 impl Effect {
     pub fn new(id: u32, owner: CardId, description: u32, code: u32, type_: u32, range: u32, flag: u32) -> Self {
-        Effect { id, owner, description, code, type_, range, flag }
+        Effect { id, owner, description, code, type_, range, flag, condition: None, cost: None, target: None, operation: None }
     }
 
     /// Create a new effect (static constructor for Lua)
@@ -28,6 +32,10 @@ impl Effect {
             type_: 0,
             range: 0,
             flag: 0,
+            condition: None,
+            cost: None,
+            target: None,
+            operation: None,
         }
     }
 }
@@ -60,24 +68,32 @@ impl UserData for Effect {
             Ok(())
         });
         
-        methods.add_method_mut("SetCondition", |_, _self, _condition: mlua::Function| {
-            // Stub - store condition function if needed
-            Ok(())
+        methods.add_method_mut("SetCondition", |lua, self_, condition: Function| {
+            match lua.create_registry_value(condition) {
+                Ok(key) => { self_.condition = Some(key); Ok(()) },
+                Err(e) => Err(e),
+            }
         });
         
-        methods.add_method_mut("SetCost", |_, _self, _cost: mlua::Function| {
-            // Stub - store cost function if needed
-            Ok(())
+        methods.add_method_mut("SetCost", |lua, self_, cost: Function| {
+            match lua.create_registry_value(cost) {
+                Ok(key) => { self_.cost = Some(key); Ok(()) },
+                Err(e) => Err(e),
+            }
         });
         
-        methods.add_method_mut("SetTarget", |_, _self, _target: mlua::Function| {
-            // Stub - store target function if needed
-            Ok(())
+        methods.add_method_mut("SetTarget", |lua, self_, target: Function| {
+            match lua.create_registry_value(target) {
+                Ok(key) => { self_.target = Some(key); Ok(()) },
+                Err(e) => Err(e),
+            }
         });
         
-        methods.add_method_mut("SetOperation", |_, _self, _operation: mlua::Function| {
-            // Stub - store operation function if needed
-            Ok(())
+        methods.add_method_mut("SetOperation", |lua, self_, operation: Function| {
+            match lua.create_registry_value(operation) {
+                Ok(key) => { self_.operation = Some(key); Ok(()) },
+                Err(e) => Err(e),
+            }
         });
         
         methods.add_method_mut("SetValue", |_, _self, _value: mlua::Value| {

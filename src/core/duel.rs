@@ -6,7 +6,6 @@ use crate::core::chain::Chain;
 use crate::core::scripting::{FileSystemLoader, ScriptLoader};
 use crate::core::group::Group;
 use crate::core::effect::Effect;
-use crate::core::event::Event;
 use crate::core::types::EffectId;
 // import Effect type (may be used for future processor logic)
 use crate::core::types::CardId;
@@ -97,17 +96,15 @@ impl DuelData {
         id
     }
 
-    /// Raise an event and check all registered effects for triggers.
-    pub fn raise_event(&mut self, code: u32, event_cards: Option<Group>, reason_player: u8) {
-        let event = Event::new(code, None, reason_player, event_cards);
-        // For now, simply check the code against registered effects and log and record triggers.
+    /// Return a list of EffectId candidates whose codes match the given event code.
+    pub fn get_matching_effects(&self, code: u32) -> Vec<EffectId> {
+        let mut out = Vec::new();
         for (idx, effect) in self.effects.iter().enumerate() {
-            if effect.code == event.code {
-                let eid = EffectId::new(idx as u32);
-                println!("Effect Triggered: id={} code={}", eid.0, effect.code);
-                self.triggered_effects.push(eid);
+            if effect.code == code {
+                out.push(EffectId::new(idx as u32));
             }
         }
+        out
     }
 }
 
@@ -234,7 +231,10 @@ impl Duel {
                         // Raise summon success event with the card wrapped in a Group
                         let mut g = Group::new();
                         g.0.insert(*card_id);
-                        data_guard.raise_event(crate::core::enums::EVENT_SUMMON_SUCCESS, Some(g), player);
+                        // Release the lock before evaluating Lua conditions to avoid deadlocks
+                        drop(data_guard);
+                        // Call static raise_event handler which bridges Lua and DuelData
+                        crate::core::duel::Duel::raise_event_static(lua, data.clone(), crate::core::enums::EVENT_SUMMON_SUCCESS, Some(g), player);
                         return Ok(1);
                     }
                 }
@@ -266,6 +266,49 @@ impl Duel {
         };
         duel.load_core_scripts().expect("Failed to load core Lua scripts");
         duel
+    }
+
+    /// Static helper to raise events from contexts where we only have Lua and access to the DuelData via app data.
+    pub fn raise_event_static(lua: &Lua, data_arc: Arc<Mutex<DuelData>>, code: u32, _event_cards: Option<Group>, _reason_player: u8) {
+        // Step 1: get list of candidate effect IDs from data
+        let candidates = {
+            let data_guard = data_arc.lock().unwrap();
+            data_guard.get_matching_effects(code)
+        };
+
+        // Step 2: build vector of (EffectId, Option<Function>) so we can call them without holding the DuelData lock
+        let mut callable: Vec<(EffectId, Option<mlua::Function>)> = Vec::new();
+        for eid in candidates {
+            let maybe_fn = {
+                let data_guard = data_arc.lock().unwrap();
+                if let Some(effect) = data_guard.effects.get(eid.0 as usize) {
+                    if let Some(ref key) = effect.condition {
+                        // Get the Function reference from the registry
+                        match lua.registry_value::<mlua::Function>(key) {
+                            Ok(f) => Some(f),
+                            Err(_) => None,
+                        }
+                    } else { None }
+                } else { None }
+            };
+            callable.push((eid, maybe_fn));
+        }
+
+        // Step 3: Call each condition function (or default true if none) and, on true, push to triggered_effects
+        for (eid, maybe_fn) in callable {
+            let result = if let Some(func) = maybe_fn {
+                match func.call::<(), bool>(()) {
+                    Ok(b) => b,
+                    Err(_) => false,
+                }
+            } else {
+                true // No condition => pass
+            };
+            if result {
+                let mut data_guard = data_arc.lock().unwrap();
+                data_guard.triggered_effects.push(eid);
+            }
+        }
     }
 
     /// Load core Lua scripts (constant.lua, utility.lua, and procedure.lua) from the external YGOPro script directory.
@@ -901,6 +944,61 @@ mod tests {
             assert!(data.triggered_effects.contains(&eid), "Effect should have been triggered by the event");
             // Also verify arena effect code
             assert_eq!(data.effects[eid.0 as usize].code, 0x1000);
+        }
+    }
+
+    #[test]
+    fn test_condition_logic() {
+        let mut duel = Duel::new(42);
+        let card_id = duel.create_card(900, 0);
+        duel.move_card(card_id, 0, Location::HAND, 0);
+
+        // Register an effect that returns false
+        let script_false = format!(r#"
+            local c = Card({})
+            local e = Effect.CreateEffect(c)
+            e:SetCode(0x1000)
+            e:SetCondition(function() return false end)
+            c:RegisterEffect(e)
+            return nil
+        "#, card_id.0);
+        let result: mlua::Result<()> = duel.lua.load(&script_false).exec();
+        assert!(result.is_ok(), "Lua script to register false effect should run");
+
+        // Register an effect that returns true
+        let script_true = format!(r#"
+            local c = Card({})
+            local e = Effect.CreateEffect(c)
+            e:SetCode(0x1000)
+            e:SetCondition(function() return true end)
+            c:RegisterEffect(e)
+            return nil
+        "#, card_id.0);
+        let result2: mlua::Result<()> = duel.lua.load(&script_true).exec();
+        assert!(result2.is_ok(), "Lua script to register true effect should run");
+
+        // Ensure no triggers before summon
+        {
+            let data = duel.data.lock().unwrap();
+            assert!(data.triggered_effects.is_empty(), "No triggered effects initially");
+        }
+
+        // Summon the card (should trigger only the one with true condition)
+        let result: mlua::Result<u32> = duel.lua.load(format!(
+            r#"
+            local c = Card({})
+            return Duel.Summon(0, c, false, nil)
+            "#,
+            card_id.0
+        )).eval();
+        assert!(result.is_ok(), "Duel.Summon should work");
+
+        // Verify triggers: only the true condition (second effect) should have been triggered
+        {
+            let data = duel.data.lock().unwrap();
+            assert_eq!(data.triggered_effects.len(), 1, "Only one effect should be triggered");
+            let triggered = data.triggered_effects[0];
+            assert_eq!(triggered.0, 1, "Second registered effect (id=1) should be triggered");
         }
     }
 }
