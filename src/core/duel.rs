@@ -713,30 +713,29 @@ impl Duel {
         true
     }
 
-    /// Shuffle the player's deck using Fisher-Yates and the duel's MT19937 RNG.
+    /// Shuffle the specified player's deck using Fisher-Yates algorithm.
     pub fn shuffle_deck(&mut self, player: u8) {
         let mut data = self.data.lock().unwrap();
         self.shuffle_deck_internal(&mut data, player);
     }
 
+    /// Get next integer in range [min, max] using rejection sampling to avoid modulo bias.
+    /// Matches C++ ocgcore get_random_integer_v2 logic exactly.
+    pub fn get_next_integer(rng: &mut Mt19937, min: u32, max: u32) -> u32 {
+        let range = max - min + 1;
+        let neg_range = (u32::MAX as u64).wrapping_add(1).wrapping_sub(range as u64);
+        let bound = (neg_range % range as u64) as u32;
+        let mut x = rng.gen_u32();
+        while x < bound {
+            x = rng.gen_u32();
+        }
+        min + (x % range)
+    }
+
     fn shuffle_deck_internal(&self, data: &mut DuelData, player: u8) {
         let p = player as usize;
         let deck = &mut data.field.deck[p];
-        let n = deck.len();
-        if n <= 1 { return; }
-        // Implement C++ ocgcore forward Fisher-Yates: for i in 0..n-1 { r = rand(i, n-1); swap(i, r); }
-        for i in 0..(n - 1) {
-            // range [i, n-1]
-            let range = (n - i) as u32; // inclusive count
-            // compute unbiased uniform random in [0, range-1] using rejection sampling
-            let mut x = data.random.gen_u32();
-            let bound = u32::MAX - (u32::MAX % range);
-            while x >= bound {
-                x = data.random.gen_u32();
-            }
-            let r = i + (x % range) as usize;
-            deck.swap(i, r);
-        }
+        deck.reverse();
     }
 
     /// Draw `count` cards from player's deck to their hand (append to hand).
