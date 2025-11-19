@@ -268,6 +268,22 @@ impl Duel {
         duel
     }
 
+    /// Resolve the chain: pop chain links in LIFO order and execute their operations.
+    pub fn resolve_chain(&mut self) {
+        loop {
+            let next_link = {
+                let mut data_guard = self.data.lock().unwrap();
+                data_guard.chain.pop()
+            };
+            if let Some(link) = next_link {
+                // Execute effect operation using saved effect id and trigger player
+                let _ = Duel::execute_effect_static(&self.lua, self.data.clone(), link.effect_id, 0u32, link.target_cards, 0u8, link.trigger_player);
+            } else {
+                break;
+            }
+        }
+    }
+
     /// Static helper to raise events from contexts where we only have Lua and access to the DuelData via app data.
     pub fn raise_event_static(lua: &Lua, data_arc: Arc<Mutex<DuelData>>, code: u32, _event_cards: Option<Group>, _reason_player: u8) {
         // Step 1: get list of candidate effect IDs from data
@@ -297,7 +313,9 @@ impl Duel {
         // Step 3: Call each condition function (or default true if none) and, on true, push to triggered_effects
         for (eid, maybe_fn) in callable {
             let result = if let Some(func) = maybe_fn {
-                match func.call::<(), bool>(()) {
+                // Build args for condition function
+                let args = (eid, 0u8, None::<Group>, 0u8, 0u32, None::<EffectId>, 0u32, 0u8);
+                match func.call::<_, bool>(args) {
                     Ok(b) => b,
                     Err(_) => false,
                 }
@@ -306,9 +324,33 @@ impl Duel {
             };
             if result {
                 let mut data_guard = data_arc.lock().unwrap();
+                // Record triggered effect and push to chain
                 data_guard.triggered_effects.push(eid);
+                let link = crate::core::chain::ChainLink { effect_id: eid, trigger_player: 0, target_cards: None };
+                data_guard.chain.add(link);
             }
         }
+    }
+
+    /// Execute an effect's operation function.
+    pub fn execute_effect_static(lua: &Lua, data_arc: Arc<Mutex<DuelData>>, effect_id: EffectId, _code: u32, event_cards: Option<Group>, reason_player: u8, trigger_player: u8) -> mlua::Result<()> {
+        // Get the operation function if any
+        let op_func = {
+            let data_guard = data_arc.lock().unwrap();
+            if let Some(effect) = data_guard.effects.get(effect_id.0 as usize) {
+                if let Some(ref key) = effect.operation {
+                    lua.registry_value::<mlua::Function>(key).ok()
+                } else { None }
+            } else { None }
+        };
+
+        if let Some(func) = op_func {
+            // Build arguments tuple (e, tp, eg, ep, ev, re, r, rp)
+            let args = (effect_id, trigger_player, event_cards, reason_player, 0u32, None::<EffectId>, 0u32, reason_player);
+            // Call the operation function
+            let _res: mlua::Value = func.call(args)?;
+        }
+        Ok(())
     }
 
     /// Load core Lua scripts (constant.lua, utility.lua, and procedure.lua) from the external YGOPro script directory.
@@ -999,6 +1041,51 @@ mod tests {
             assert_eq!(data.triggered_effects.len(), 1, "Only one effect should be triggered");
             let triggered = data.triggered_effects[0];
             assert_eq!(triggered.0, 1, "Second registered effect (id=1) should be triggered");
+        }
+    }
+
+    #[test]
+    fn test_effect_resolution() {
+        let mut duel = Duel::new(42);
+        let card_id = duel.create_card(777, 0);
+        duel.move_card(card_id, 0, Location::HAND, 0);
+
+        // Register an effect which sends its handler card to grave in operation
+        let script = format!(r#"
+            local c = Card({})
+            local e = Effect.CreateEffect(c)
+            e:SetCode(0x1000)
+            e:SetCondition(function() return true end)
+            e:SetOperation(function(e, tp, eg, ep, ev, re, r, rp)
+                local c = e:GetHandler()
+                Duel.SendtoGrave(c, 0x1)
+            end)
+            c:RegisterEffect(e)
+            return nil
+        "#, card_id.0);
+        let result: mlua::Result<()> = duel.lua.load(&script).exec();
+        assert!(result.is_ok(), "Lua script to register effect should run");
+
+        // Summon the card which should trigger and push to chain (not execute yet)
+        let res: mlua::Result<u32> = duel.lua.load(format!(r#"
+            local c = Card({})
+            return Duel.Summon(0, c, false, nil)
+        "#, card_id.0)).eval();
+        assert!(res.is_ok(), "Duel.Summon should work");
+
+        // It should have been added to the chain but not executed yet
+        {
+            let data = duel.data.lock().unwrap();
+            assert_eq!(data.chain.links.len(), 1, "Chain should have one link");
+        }
+
+        // Resolve the chain and then verify the operation executed
+        duel.resolve_chain();
+        let data = duel.data.lock().unwrap();
+        if let Some(c) = data.get_card(card_id) {
+            assert!(c.location.contains(Location::GRAVE), "Card should be in grave after operation executed");
+        } else {
+            panic!("card consistently missing");
         }
     }
 }

@@ -1,5 +1,7 @@
-use crate::core::types::CardId;
+use crate::core::types::{CardId, EffectId};
 use mlua::{UserData, UserDataMethods, RegistryKey, Function};
+use std::sync::{Arc, Mutex};
+use crate::core::duel::DuelData;
 
 /// Basic Effect structure for now
 #[derive(Debug)]
@@ -99,6 +101,50 @@ impl UserData for Effect {
         methods.add_method_mut("SetValue", |_, _self, _value: mlua::Value| {
             // Stub - store value if needed
             Ok(())
+        });
+    }
+}
+
+// Implement EffectId UserData wrapper so Lua operations get a userdata representing the registered effect.
+impl UserData for EffectId {
+    fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
+        // GetHandler returns the owning CardId as a Card userdata
+        methods.add_method("GetHandler", |lua, self_, ()| {
+            let data = lua.app_data_ref::<Arc<Mutex<DuelData>>>()
+                .expect("DuelData not found in Lua app data");
+            let data_guard = data.lock().unwrap();
+            if let Some(effect) = data_guard.effects.get(self_.0 as usize) {
+                let owner = effect.owner;
+                // Return Card userdata
+                let ud = lua.create_userdata(owner)?;
+                Ok(ud)
+            } else {
+                Err(mlua::Error::RuntimeError("Effect not found".to_string()))
+            }
+        });
+
+        methods.add_method("GetOwner", |lua, self_, ()| {
+            let data = lua.app_data_ref::<Arc<Mutex<DuelData>>>()
+                .expect("DuelData not found in Lua app data");
+            let data_guard = data.lock().unwrap();
+            if let Some(effect) = data_guard.effects.get(self_.0 as usize) {
+                let owner = effect.owner;
+                let ud = lua.create_userdata(owner)?;
+                Ok(ud)
+            } else {
+                Err(mlua::Error::RuntimeError("Effect not found".to_string()))
+            }
+        });
+
+        methods.add_method("GetCode", |lua, self_, ()| {
+            let data = lua.app_data_ref::<Arc<Mutex<DuelData>>>()
+                .expect("DuelData not found in Lua app data");
+            let data_guard = data.lock().unwrap();
+            if let Some(effect) = data_guard.effects.get(self_.0 as usize) {
+                Ok(effect.code)
+            } else {
+                Err(mlua::Error::RuntimeError("Effect not found".to_string()))
+            }
         });
     }
 }
