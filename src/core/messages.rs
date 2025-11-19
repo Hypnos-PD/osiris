@@ -267,3 +267,99 @@ impl MsgLpUpdate {
     }
 }
 
+/// Move payload: code, from player, from loc, from seq, from pos, to player, to loc, to seq, to pos, reason
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgMove {
+    pub code: u32,
+    pub from_player: u8,
+    pub from_loc: u8,
+    pub from_seq: u8,
+    pub from_pos: u8,
+    pub to_player: u8,
+    pub to_loc: u8,
+    pub to_seq: u8,
+    pub to_pos: u8,
+    pub reason: i32,
+}
+
+impl MsgMove {
+    pub fn parse(payload: &[u8]) -> Option<MsgMove> {
+        let mut cursor = Cursor::new(payload);
+        let code = cursor.read_i32::<LittleEndian>().ok()? as u32;
+        let from_player = cursor.read_u8().ok()?;
+        let from_loc = cursor.read_u8().ok()?;
+        let from_seq = cursor.read_u8().ok()?;
+        let from_pos = cursor.read_u8().ok()?;
+        let to_player = cursor.read_u8().ok()?;
+        let to_loc = cursor.read_u8().ok()?;
+        let to_seq = cursor.read_u8().ok()?;
+        let to_pos = cursor.read_u8().ok()?;
+        let reason = cursor.read_i32::<LittleEndian>().ok()?;
+        Some(MsgMove { code, from_player, from_loc, from_seq, from_pos, to_player, to_loc, to_seq, to_pos, reason })
+    }
+}
+
+/// Summon payload: code, player, loc, seq, pos
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgSummoning { pub code: u32, pub player: u8, pub loc: u8, pub seq: u8, pub pos: u8, pub attack: Option<i32>, pub level: Option<u8> }
+
+impl MsgSummoning { pub fn parse(payload: &[u8]) -> Option<MsgSummoning> {
+    let mut cursor = Cursor::new(payload);
+    let code = cursor.read_i32::<LittleEndian>().ok()? as u32;
+    let player = cursor.read_u8().ok()?;
+    let loc = cursor.read_u8().ok()?;
+    let seq = cursor.read_u8().ok()?;
+    let pos = cursor.read_u8().ok()?;
+    let attack = if (cursor.position() as usize) + 4 <= payload.len() { Some(cursor.read_i32::<LittleEndian>().ok()?) } else { None };
+    let level = if (cursor.position() as usize) + 1 <= payload.len() { Some(cursor.read_u8().ok()?) } else { None };
+    Some(MsgSummoning { code, player, loc, seq, pos, attack, level })
+}}
+
+/// Special Summon payload: same as summoning
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgSpSummoning { pub code: u32, pub player: u8, pub loc: u8, pub seq: u8, pub pos: u8, pub attack: Option<i32>, pub level: Option<u8> }
+
+impl MsgSpSummoning { pub fn parse(payload: &[u8]) -> Option<MsgSpSummoning> {
+    let mut cursor = Cursor::new(payload);
+    let code = cursor.read_i32::<LittleEndian>().ok()? as u32;
+    let player = cursor.read_u8().ok()?;
+    let loc = cursor.read_u8().ok()?;
+    let seq = cursor.read_u8().ok()?;
+    let pos = cursor.read_u8().ok()?;
+    let attack = if (cursor.position() as usize) + 4 <= payload.len() { Some(cursor.read_i32::<LittleEndian>().ok()?) } else { None };
+    let level = if (cursor.position() as usize) + 1 <= payload.len() { Some(cursor.read_u8().ok()?) } else { None };
+    Some(MsgSpSummoning { code, player, loc, seq, pos, attack, level })
+}}
+
+/// Chaining payload: code, src_player, src_loc, src_seq, src_sub, target_player, target_loc, target_seq, desc, type
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgChaining {
+    pub code: u32,
+    pub src_player: u8,
+    pub src_loc: u8,
+    pub src_seq: u8,
+    pub src_sub: u8,
+    pub trg_player: u8,
+    pub trg_loc: u8,
+    pub trg_seq: u8,
+    pub desc: i32,
+    pub ctype: u8,
+}
+
+impl MsgChaining {
+    pub fn parse(payload: &[u8]) -> Option<MsgChaining> {
+        let mut cursor = Cursor::new(payload);
+        let code = cursor.read_i32::<LittleEndian>().ok()? as u32;
+        let src_player = cursor.read_u8().ok()?;
+        let src_loc = cursor.read_u8().ok()?;
+        let src_seq = cursor.read_u8().ok()?;
+        let src_sub = cursor.read_u8().ok()?;
+        let trg_player = cursor.read_u8().ok()?;
+        let trg_loc = cursor.read_u8().ok()?;
+        let trg_seq = cursor.read_u8().ok()?;
+        let desc = cursor.read_i32::<LittleEndian>().ok()?;
+        let ctype = cursor.read_u8().ok()?;
+        Some(MsgChaining { code, src_player, src_loc, src_seq, src_sub, trg_player, trg_loc, trg_seq, desc, ctype })
+    }
+}
+

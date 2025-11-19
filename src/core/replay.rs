@@ -422,9 +422,13 @@ mod tests {
         }
 
         // parse first N packets and print their types
-        use crate::core::messages::{parse_packet, MsgType, MsgStart, MsgNewTurn};
-        let n = 20usize;
+        use crate::core::messages::{parse_packet, MsgType, MsgStart, MsgNewTurn, MsgMove, MsgSummoning, MsgSpSummoning, MsgChaining};
+        let n = r.packet_data.len();
         let mut seen: Vec<MsgType> = Vec::new();
+        let mut move_count = 0usize;
+        let mut summon_count = 0usize;
+        let mut spsummon_count = 0usize;
+        let mut chain_count = 0usize;
         for pkt in r.packet_data.iter().take(n) {
             let (msg, payload) = parse_packet(pkt);
             println!("Packet msg: {:?} payload len {}", msg, payload.len());
@@ -445,6 +449,26 @@ mod tests {
                         println!("Parsed MSG_DRAW: player {} count {}", d.player, d.count);
                     }
                 }
+                MsgType::Move => {
+                    if let Some(m) = MsgMove::parse(payload) {
+                        println!("Move: code {} from P{}@{}:{} to P{}@{}:{} reason {}", m.code, m.from_player, m.from_loc, m.from_seq, m.to_player, m.to_loc, m.to_seq, m.reason);
+                    }
+                }
+                MsgType::Summoning => {
+                    if let Some(s) = MsgSummoning::parse(payload) {
+                        println!("Summon: code {} loc {} seq {} pos {} atk {:?} lvl {:?}", s.code, s.loc, s.seq, s.pos, s.attack, s.level);
+                    }
+                }
+                MsgType::SPSummoning => {
+                    if let Some(s) = MsgSpSummoning::parse(payload) {
+                        println!("SPSummon: code {} loc {} seq {} pos {} atk {:?} lvl {:?}", s.code, s.loc, s.seq, s.pos, s.attack, s.level);
+                    }
+                }
+                MsgType::Chaining => {
+                    if let Some(c) = MsgChaining::parse(payload) {
+                        println!("Chain: code {} src P{}@{}:{} sub {} trg P{}@{}:{} desc {} type {}", c.code, c.src_player, c.src_loc, c.src_seq, c.src_sub, c.trg_player, c.trg_loc, c.trg_seq, c.desc, c.ctype);
+                    }
+                }
                 MsgType::LpUpdate => {
                     if let Some(l) = crate::core::messages::MsgLpUpdate::parse(payload) {
                         println!("Parsed MSG_LP_UPDATE: player {} lp {}", l.player, l.lp);
@@ -457,7 +481,15 @@ mod tests {
                     }
                 }
             }
+            match msg {
+                MsgType::Move => move_count += 1usize,
+                MsgType::Summoning => summon_count += 1usize,
+                MsgType::SPSummoning => spsummon_count += 1usize,
+                MsgType::Chaining => chain_count += 1usize,
+                _ => {}
+            }
             seen.push(msg);
         }
+        println!("Summary counts: moves={} summons={} spsummons={} chains={}", move_count, summon_count, spsummon_count, chain_count);
     }
 }
