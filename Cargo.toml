@@ -7,3 +7,4 @@ default-run = "osiris"
 [dependencies]
 bitflags = "2.6"
 mlua = { version = "0.9", features = ["lua53", "vendored", "send"] }
+rusqlite = { version = "0.31", features = ["bundled"] }

@@ -7,6 +7,7 @@ use crate::core::scripting::{FileSystemLoader, ScriptLoader};
 use crate::core::group::Group;
 use crate::core::effect::Effect;
 use crate::core::types::EffectId;
+use crate::core::database::Database;
 // import Effect type (may be used for future processor logic)
 use crate::core::types::CardId;
 use mlua::{Lua, UserData};
@@ -24,6 +25,7 @@ pub struct DuelData {
     pub turn_player: u8,
     pub effects: Vec<Effect>,
     pub triggered_effects: Vec<EffectId>,
+    pub database: std::sync::Arc<std::sync::Mutex<Database>>,
 }
 
 impl DuelData {
@@ -119,6 +121,13 @@ pub struct Duel {
 
 impl Duel {
     pub fn new(seed: u32) -> Self {
+        // default to creating an in-memory DB
+        let db = Database::open_in_memory().expect("Failed to open default database");
+        let db_arc = Arc::new(Mutex::new(db));
+        Duel::new_with_db(seed, db_arc)
+    }
+
+    pub fn new_with_db(seed: u32, db_arc: Arc<Mutex<Database>>) -> Self {
         let lua = Lua::new();
         
         // Register global tables in Lua
@@ -255,6 +264,7 @@ impl Duel {
             turn_player: 0,
             effects: Vec::new(),
             triggered_effects: Vec::new(),
+                database: db_arc,
         }));
         
         // Inject state into Lua
@@ -445,6 +455,22 @@ impl Duel {
     /// Create a card in the arena and return its CardId handle.
     pub fn create_card(&mut self, code: u32, owner: u8) -> CardId {
         let mut card = Card::new(code);
+        // If a database entry exists, populate stats
+        let db_arc = {
+            let d = self.data.lock().unwrap();
+            d.database.clone()
+        };
+        if let Ok(mut dbg) = db_arc.lock() {
+            if let Ok(Some(cdata)) = dbg.query_card(code) {
+                    card.original_stats.level = cdata.level;
+                    card.original_stats.attack = cdata.attack;
+                    card.original_stats.base_attack = cdata.attack;
+                    card.original_stats.base_defense = cdata.defense;
+                    card.original_stats.defense = cdata.defense;
+                    // other fields
+                    // We don't map type_/attribute/race enums directly here for simplicity
+            }
+        }
         card.owner = owner;
         card.controller = owner;
         // initialize original stats base values if needed
@@ -851,6 +877,27 @@ mod tests {
         assert!(result.is_ok(), "Card:GetLocation() should work");
         let location = result.unwrap();
         assert_eq!(location, Location::HAND.bits() as u32, "Card:GetLocation() should return the actual location");
+    }
+
+    #[test]
+    fn test_create_card_from_db() {
+        // Build an in-memory DB and insert a card record
+        let db = crate::core::database::Database::open_in_memory().expect("open in memory");
+        db.conn.execute(
+            "CREATE TABLE datas (id INTEGER, alias INTEGER, setcode INTEGER, type INTEGER, level INTEGER, attribute INTEGER, race INTEGER, atk INTEGER, def INTEGER);",
+            rusqlite::params![]
+        ).unwrap();
+        db.conn.execute(
+            "INSERT INTO datas (id, alias, setcode, type, level, attribute, race, atk, def) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![555i64, 0i64, 0i64, 1i64, 4i64, 1i64, 1i64, 2000i64, 1500i64]).unwrap();
+
+        let db_arc = Arc::new(Mutex::new(db));
+        let mut duel = Duel::new_with_db(42, db_arc);
+        let id = duel.create_card(555, 0);
+        let data = duel.data.lock().unwrap();
+        let card = data.get_card(id).unwrap();
+        assert_eq!(card.original_stats.attack, 2000);
+        assert_eq!(card.original_stats.defense, 1500);
     }
 
     #[test]
