@@ -80,4 +80,14 @@ mod tests {
             assert_eq!(mt.gen_u32(), e);
         }
     }
+
+    #[test]
+    fn test_mt19937_standard_values() {
+        // Check known MT19937 outputs for seed 42
+        let mut mt = Mt19937::new(42);
+        let first = mt.gen_u32();
+        let second = mt.gen_u32();
+        assert_eq!(first, 1608637542);
+        assert_eq!(second, 3421126067);
+    }
 }

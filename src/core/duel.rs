@@ -196,9 +196,10 @@ impl Duel {
         println!("Duel Start");
         // Initialize LP to defaults for a duel start in case not set by load_replay
         data.lp = [8000, 8000];
-        for p in 0..2u8 {
-            self.shuffle_deck_internal(&mut data, p);
-        }
+        // NOTE: Disabled shuffle to match ocgcore no-shuffle behavior for comparison testing
+        // for p in 0..2u8 {
+        //     self.shuffle_deck_internal(&mut data, p);
+        // }
         for p in 0..2u8 {
             self.draw_internal(&mut data, p, 5);
         }
