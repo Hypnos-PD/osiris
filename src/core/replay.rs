@@ -422,7 +422,7 @@ mod tests {
         }
 
         // parse first N packets and print their types using STOC protocol unwrapping
-        use crate::core::messages::{parse_replay_packet_enhanced, StocType, MsgType, MsgStart, MsgNewTurn, MsgMove, MsgSummoning, MsgSpSummoning, MsgChaining};
+        use crate::core::messages::{parse_replay_packet_enhanced, MsgType, MsgStart, MsgNewTurn, MsgMove, MsgSummoning, MsgSpSummoning, MsgChaining};
         let n = r.packet_data.len();
         let mut seen: Vec<MsgType> = Vec::new();
         let mut move_count = 0usize;
@@ -539,14 +539,14 @@ mod tests {
                                 println!("  Parsed packets: {}", r.packet_data.len());
                                 
                                 // Parse packets and examine ID 0 messages using STOC protocol unwrapping
-                                use crate::core::messages::{parse_replay_packet_enhanced, StocType, MsgType, MsgStart};
+                                use crate::core::messages::{parse_replay_packet_enhanced, MsgType, MsgStart};
                                 
                                 let mut id0_count = 0usize;
                                 let mut id0_with_18_bytes = 0usize;
                                 let mut parsed_as_start = 0usize;
                                 
                                 for (i, pkt) in r.packet_data.iter().enumerate() {
-                                    let (stoc_type, msg, payload) = parse_replay_packet_enhanced(pkt);
+                                    let (_, msg, payload) = parse_replay_packet_enhanced(pkt);
                                     
                                     if let MsgType::Unknown(0) = msg {
                                         id0_count += 1;

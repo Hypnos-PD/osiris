@@ -12,3 +12,4 @@ pub mod event;
 pub mod database;
 pub mod replay;
 pub mod messages;
+pub mod processor;

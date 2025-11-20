@@ -1,5 +1,5 @@
 use crate::core::card::Card;
-use crate::core::enums::{Location, CardStatus};
+use crate::core::enums::{Location, CardStatus, Phase};
 use crate::core::field::Field;
 use crate::core::mtrandom::Mt19937;
 use crate::core::chain::Chain;
@@ -8,6 +8,8 @@ use crate::core::group::Group;
 use crate::core::effect::Effect;
 use crate::core::types::EffectId;
 use crate::core::database::Database;
+use crate::core::processor::{ProcessorUnit, ProcessorType, ProcessResult};
+use std::collections::VecDeque;
 // import Effect type (may be used for future processor logic)
 use crate::core::types::CardId;
 use mlua::{Lua, UserData};
@@ -20,7 +22,8 @@ pub struct DuelData {
     pub field: Field,
     pub random: Mt19937,
     pub chain: Chain,
-    pub state: ProcessorState,
+    pub processor_units: VecDeque<ProcessorUnit>,
+    pub phase: Phase,
     pub turn: u32,
     pub turn_player: u8,
     pub lp: [u32; 2],
@@ -199,8 +202,9 @@ impl Duel {
         let mut data = self.data.lock().unwrap();
         // Reset RNG using the header seed
         data.random = Mt19937::new(replay.header.seed);
-        // Reset processor state to Start
-        data.state = ProcessorState::Start;
+        // Reset processor units to initial turn unit
+        data.processor_units = VecDeque::from([ProcessorUnit::turn(0)]);
+        data.phase = Phase::empty();
         // Reset turn counter
         data.turn = 0;
         // Set starting LP according to replay parameters if provided
@@ -217,56 +221,13 @@ impl Duel {
             self.load_deck(p, &deck.main, &deck.extra);
         }
     }
-    /// Handle Start processing step (shuffle & initial draw)
-    fn process_start(&mut self) -> bool {
-        let mut data = self.data.lock().unwrap();
-        println!("Duel Start");
-        // Initialize LP to defaults for a duel start in case not set by load_replay
-        data.lp = [8000, 8000];
-        // Shuffle and draw are done by script in utility.lua BeginDuel
-        data.state = ProcessorState::TurnChange;
-        true
-    }
+    // Old state machine methods removed - replaced by processor unit system
 
-    /// Handle turn change: increment turn, swap player, and go to Draw phase
-    fn process_turn_change(&mut self) -> bool {
-        let mut data = self.data.lock().unwrap();
-        data.turn += 1;
-        // On the first turn, choose starting player based on RNG so it matches C++'s selection.
-        if data.turn == 1 {
-            let v = data.random.gen_u32();
-            data.turn_player = (v % 2) as u8;
-        } else {
-            data.turn_player = (data.turn_player + 1) % 2;
-        }
-        data.state = ProcessorState::Draw;
-        true
-    }
+    // Old state machine methods removed - replaced by processor unit system
 
-    /// Handle draw phase
-    fn process_draw_phase(&mut self) -> bool {
-        let turn_player = {
-            let data = self.data.lock().unwrap();
-            data.turn_player
-        };
-        // Draw a card for the current player; use `draw` which does lock management
-        self.draw(turn_player, 1);
-        // Raise EVENT_DRAW
-        let lua = &self.lua;
-        let data_arc = self.data.clone();
-        Duel::raise_event_static(lua, data_arc, crate::core::enums::EVENT_DRAW, None, turn_player, None);
-        // Go to Main1 phase next
-        let mut data = self.data.lock().unwrap();
-        data.state = ProcessorState::Main1;
-        true
-    }
+    // Old state machine methods removed - replaced by processor unit system
 
-    /// Handle main phases (Main1/Main2)
-    fn process_main_phase(&mut self, _phase: crate::core::enums::Phase) -> bool {
-        println!("Entering Main Phase");
-        // For now, just wait for player input (return false to pause processing)
-        false
-    }
+    // Old state machine methods removed - replaced by processor unit system
     pub fn new(seed: u32) -> Self {
         // default to creating an in-memory DB
         let db = Database::open_in_memory().expect("Failed to open default database");
@@ -424,7 +385,8 @@ impl Duel {
             field: Field::new(),
             random: Mt19937::new(seed),
             chain: Chain::new(),
-            state: ProcessorState::Start,
+            processor_units: VecDeque::from([ProcessorUnit::turn(0)]),
+            phase: Phase::empty(),
             turn: 0,
             turn_player: 0,
             lp: [8000, 8000],
@@ -581,62 +543,68 @@ pub enum ProcessorState {
 }
 
 impl Duel {
-    /// Process the duel state machine for one cycle: returns true to continue, false to stop.
-    pub fn process(&mut self) -> bool {
+    /// Process the duel state machine for one cycle: returns ProcessResult.
+    pub fn process(&mut self) -> ProcessResult {
         // Priority: if there is a chain, resolve it before doing anything else
         {
             let data = self.data.lock().unwrap();
             if data.chain.links.len() > 0 {
                 drop(data);
                 self.resolve_chain();
-                return true;
+                return ProcessResult::Continue;
             }
         }
-        // No chain to resolve: handle processor state
-        let state_copy = { let data = self.data.lock().unwrap(); data.state };
-        match state_copy {
-            ProcessorState::Start => self.process_start(),
-            ProcessorState::TurnChange => self.process_turn_change(),
-            ProcessorState::Draw => self.process_draw_phase(),
-            ProcessorState::Standby => {
-                println!("Standby Phase");
-                // For now just move to Main1
-                let mut data = self.data.lock().unwrap();
-                data.state = ProcessorState::Main1;
-                true
+        
+        // Process unit queue
+        let mut data = self.data.lock().unwrap();
+        if data.processor_units.is_empty() {
+            return ProcessResult::End;
+        }
+        
+        // Peek the front unit
+        let unit = data.processor_units.front_mut().unwrap();
+        
+        // Process based on unit type
+        match unit.type_ {
+            ProcessorType::Turn => {
+                // For now, just pop the turn unit and push phase events
+                data.processor_units.pop_front();
+                data.processor_units.push_front(ProcessorUnit::phase_event(0, Phase::DRAW.bits()));
+                ProcessResult::Continue
             }
-            ProcessorState::Main1 => self.process_main_phase(crate::core::enums::Phase::MAIN1),
-            ProcessorState::BattleStart => {
-                println!("Battle Start Phase");
-                false
+            ProcessorType::PhaseEvent => {
+                // Handle phase events
+                let phase_bits = unit.arg1;
+                if phase_bits == Phase::DRAW.bits() {
+                    // Pop the phase event and process draw
+                    data.processor_units.pop_front();
+                    drop(data); // Release lock before calling draw
+                    let turn_player = {
+                        let data = self.data.lock().unwrap();
+                        data.turn_player
+                    };
+                    self.draw(turn_player, 1);
+                    // Raise EVENT_DRAW
+                    let lua = &self.lua;
+                    let data_arc = self.data.clone();
+                    Duel::raise_event_static(lua, data_arc, crate::core::enums::EVENT_DRAW, None, turn_player, None);
+                    // Push next phase
+                    let mut data = self.data.lock().unwrap();
+                    data.processor_units.push_front(ProcessorUnit::phase_event(0, Phase::MAIN1.bits()));
+                    ProcessResult::Continue
+                } else if phase_bits == Phase::MAIN1.bits() || phase_bits == Phase::MAIN2.bits() {
+                    // For now, just wait for player input
+                    ProcessResult::Waiting
+                } else {
+                    // Unhandled phase, just pop and continue
+                    data.processor_units.pop_front();
+                    ProcessResult::Continue
+                }
             }
-            ProcessorState::BattleStep => {
-                println!("Battle Step Phase");
-                false
-            }
-            ProcessorState::Damage => {
-                println!("Damage Phase");
-                false
-            }
-            ProcessorState::DamageCal => {
-                println!("Damage Calculation Phase");
-                false
-            }
-            ProcessorState::Battle => {
-                println!("Battle Phase");
-                false
-            }
-            ProcessorState::Main2 => self.process_main_phase(crate::core::enums::Phase::MAIN2),
-            ProcessorState::End => {
-                println!("End Phase");
-                // For now go to TurnChange
-                let mut data = self.data.lock().unwrap();
-                data.state = ProcessorState::TurnChange;
-                true
-            }
-            ProcessorState::GameOver => {
-                println!("Game Over");
-                false
+            _ => {
+                // Unhandled unit type, just pop and continue
+                data.processor_units.pop_front();
+                ProcessResult::Continue
             }
         }
     }
@@ -902,37 +870,39 @@ mod tests {
             d.create_card(100 + i, 0);
             d.create_card(200 + i, 1);
         }
-        // Ensure initial pointers - state should be Start
+        // Ensure initial pointers - should have turn unit
         let data = d.data.lock().unwrap();
-        println!("Initial state: {:?}", data.state);
-        assert_eq!(data.state, ProcessorState::Start);
+        assert!(!data.processor_units.is_empty(), "Should have initial processor units");
+        assert_eq!(data.processor_units[0].type_, ProcessorType::Turn);
         drop(data);
-        // Step the processor and assert expected state transitions
-        assert!(d.process(), "Start->TurnChange should continue");
+        // Step the processor and assert expected unit transitions
+        assert_eq!(d.process(), ProcessResult::Continue, "Turn->PhaseEvent should continue");
         {
             let data = d.data.lock().unwrap();
-            assert_eq!(data.state, ProcessorState::TurnChange);
+            assert!(!data.processor_units.is_empty(), "Should have phase event unit");
+            assert_eq!(data.processor_units[0].type_, ProcessorType::PhaseEvent);
+            assert_eq!(data.processor_units[0].arg1, Phase::DRAW.bits());
         }
-        assert!(d.process(), "TurnChange->Draw should continue");
+        assert_eq!(d.process(), ProcessResult::Continue, "Draw phase should continue");
         {
             let data = d.data.lock().unwrap();
-            assert_eq!(data.state, ProcessorState::Draw);
+            assert!(!data.processor_units.is_empty(), "Should have next phase event unit");
+            assert_eq!(data.processor_units[0].type_, ProcessorType::PhaseEvent);
+            assert_eq!(data.processor_units[0].arg1, Phase::MAIN1.bits());
         }
-        assert!(d.process(), "Draw->Main1 should continue");
-        {
-            let data = d.data.lock().unwrap();
-            assert_eq!(data.state, ProcessorState::Main1);
-        }
+        assert_eq!(d.process(), ProcessResult::Waiting, "Main1 phase should wait");
         // After first full cycle, turn should be > 0
         let data = d.data.lock().unwrap();
         assert!(data.turn > 0);
         // Note: Initial hand drawing is done by Lua script BeginDuel, not by processor
-        // For now, just verify that processor state transitions work correctly
+        // For now, just verify that processor unit transitions work correctly
         // Hand sizes will be 0 because BeginDuel hasn't been called
         assert_eq!(data.field.hand[0].len(), 0);
         assert_eq!(data.field.hand[1].len(), 0);
-        // Ensure state is Main1 (processing paused)
-        assert_eq!(data.state, ProcessorState::Main1);
+        // Ensure we're waiting in Main1 phase
+        assert!(!data.processor_units.is_empty(), "Should still have processor units");
+        assert_eq!(data.processor_units[0].type_, ProcessorType::PhaseEvent);
+        assert_eq!(data.processor_units[0].arg1, Phase::MAIN1.bits());
     }
 
     #[test]
@@ -1379,8 +1349,9 @@ mod tests {
         let actual_first = data.random.gen_u32();
         assert_eq!(actual_first, expected_first, "RNG should produce deterministic output based on replay seed");
         
-        // Check processor state was reset
-        assert_eq!(data.state, ProcessorState::Start, "Processor state should be reset to Start");
+        // Check processor units were reset
+        assert!(!data.processor_units.is_empty(), "Processor units should be initialized");
+        assert_eq!(data.processor_units[0].type_, ProcessorType::Turn, "First unit should be Turn type");
         
         // Check turn counter was reset
         assert_eq!(data.turn, 0, "Turn counter should be reset to 0");
@@ -1449,7 +1420,7 @@ mod tests {
 
         // Run the processing loop until it waits on input at Main1
         let mut steps = 0;
-        while duel.process() && steps < 100 {
+        while duel.process() == ProcessResult::Continue && steps < 100 {
             steps += 1;
         }
 
@@ -1462,7 +1433,10 @@ mod tests {
         println!("tp={} hand sizes: {} {}", tp, data.field.hand[tp].len(), data.field.hand[other].len());
         assert_eq!(data.field.hand[tp].len(), 0, "Hand should be empty until BeginDuel is called");
         assert_eq!(data.field.hand[other].len(), 0, "Hand should be empty until BeginDuel is called");
-        assert_eq!(data.state, ProcessorState::Main1);
+        // Check we're waiting in Main1 phase
+        assert!(!data.processor_units.is_empty(), "Should still have processor units");
+        assert_eq!(data.processor_units[0].type_, ProcessorType::PhaseEvent);
+        assert_eq!(data.processor_units[0].arg1, Phase::MAIN1.bits());
         assert_eq!(data.lp[0], 8000);
         assert_eq!(data.lp[1], 8000);
     }
