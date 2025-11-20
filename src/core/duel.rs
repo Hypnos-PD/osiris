@@ -416,8 +416,8 @@ impl Duel {
                 data_guard.chain.pop()
             };
             if let Some(link) = next_link {
-                // Execute effect operation using saved effect id and trigger player
-                let _ = Duel::execute_effect_static(&self.lua, self.data.clone(), link.effect_id, 0u32, link.target_cards, link.reason_effect, link.reason_player, link.trigger_player);
+                // Execute effect operation using SNAPSHOTTED event context from chain link
+                let _ = Duel::execute_effect_static(&self.lua, self.data.clone(), link.effect_id, 0u32, link.evt_group, link.evt_effect, link.evt_r_player, link.trigger_player, link.evt_value, link.evt_reason);
             } else {
                 break;
             }
@@ -466,7 +466,20 @@ impl Duel {
                 let mut data_guard = data_arc.lock().unwrap();
                 // Record triggered effect and push to chain
                 data_guard.triggered_effects.push(eid);
-                let link = crate::core::chain::ChainLink { effect_id: eid, trigger_player: 0, target_cards: event_cards.clone(), reason_effect: reason_effect, reason_player };
+                let link = crate::core::chain::ChainLink { 
+                    effect_id: eid, 
+                    trigger_player: 0, 
+                    check_player: 0,
+                    target_cards: event_cards.clone(), 
+                    reason_effect: reason_effect, 
+                    reason_player,
+                    evt_group: event_cards.clone(),
+                    evt_player: reason_player,
+                    evt_value: 0,
+                    evt_effect: reason_effect,
+                    evt_reason: 0,
+                    evt_r_player: reason_player,
+                };
                 data_guard.chain.add(link);
             }
         }
@@ -481,8 +494,17 @@ impl Duel {
         Ok(args)
     }
 
+    /// Helper to produce Lua argument tuple (e, tp, eg, ep, ev, re, r, rp) with full event context
+    pub fn get_lua_args_with_context<'lua>(_lua: &'lua Lua, effect_id: EffectId, trigger_player: u8, event_cards: &Option<Group>, reason_player: u8, reason_effect: Option<EffectId>, event_value: u32, event_reason: u32) -> mlua::Result<(EffectId, u8, Option<Group>, u8, u32, Option<EffectId>, u32, u8)> {
+        // We can copy Group and Option<EffectId> directly as they are ToLua.
+        let eg = event_cards.clone();
+        let re = reason_effect;
+        let args = (effect_id, trigger_player, eg, reason_player, event_value, re, event_reason, reason_player);
+        Ok(args)
+    }
+
     /// Execute an effect's operation function.
-    pub fn execute_effect_static(lua: &Lua, data_arc: Arc<Mutex<DuelData>>, effect_id: EffectId, _code: u32, event_cards: Option<Group>, reason_effect: Option<EffectId>, reason_player: u8, trigger_player: u8) -> mlua::Result<()> {
+    pub fn execute_effect_static(lua: &Lua, data_arc: Arc<Mutex<DuelData>>, effect_id: EffectId, _code: u32, event_cards: Option<Group>, reason_effect: Option<EffectId>, reason_player: u8, trigger_player: u8, event_value: u32, event_reason: u32) -> mlua::Result<()> {
         // Get the operation function if any
         let op_func = {
             let data_guard = data_arc.lock().unwrap();
@@ -495,7 +517,7 @@ impl Duel {
 
         if let Some(func) = op_func {
             // Build arguments tuple (e, tp, eg, ep, ev, re, r, rp)
-            let args = Duel::get_lua_args(lua, effect_id, trigger_player, &event_cards, reason_player, reason_effect)?;
+            let args = Duel::get_lua_args_with_context(lua, effect_id, trigger_player, &event_cards, reason_player, reason_effect, event_value, event_reason)?;
             // Call the operation function
             let _res: mlua::Value = func.call(args)?;
         }
@@ -1742,6 +1764,68 @@ mod tests {
             assert!(data.triggered_effects.is_empty(), "Triggered effects should be cleared");
             assert_eq!(data.processor_units[0].type_, ProcessorType::PhaseEvent, "Should be in PhaseEvent");
             assert_eq!(data.processor_units[0].arg1, Phase::MAIN1.bits(), "Should be in Main1 phase");
+        }
+    }
+
+    #[test]
+    fn test_chain_args_snapshot() {
+        use crate::core::enums::EVENT_MOVE;
+        use crate::core::effect::Effect;
+        use crate::core::types::{EffectId, CardId};
+        
+        let mut duel = Duel::new(42);
+        
+        // Create a card
+        let card_id = duel.create_card(12345, 0);
+        
+        // Manually create and register an effect
+        let effect_id = EffectId::new(1);
+        {
+            let mut data = duel.data.lock().unwrap();
+            let effect = Effect::new(1, card_id, 0, EVENT_MOVE, 0, 0, 0);
+            
+            // Add effect to effects list
+            while data.effects.len() <= effect_id.0 as usize {
+                data.effects.push(Effect::new(0, CardId::new(0), 0, 0, 0, 0, 0));
+            }
+            data.effects[effect_id.0 as usize] = effect;
+            
+            // Add effect to card
+            if let Some(card) = data.cards.get_mut(card_id.0 as usize) {
+                card.effects.push(effect_id);
+            }
+        }
+        
+        // Create a group with our card
+        let mut group = crate::core::group::Group::new();
+        group.0.insert(card_id);
+        
+        // Raise event
+        let data_arc = duel.data.clone();
+        Duel::raise_event_static(&duel.lua, data_arc, EVENT_MOVE, Some(group), 0, None);
+        
+        // Check that the effect was triggered and added to chain
+        {
+            let data = duel.data.lock().unwrap();
+            assert!(!data.triggered_effects.is_empty(), "Effect should be triggered");
+            assert!(!data.chain.links.is_empty(), "Chain should have links");
+            
+            // Verify the chain link has the snapshotted event context
+            let link = &data.chain.links[0];
+            assert_eq!(link.effect_id, effect_id, "Effect ID should match");
+            assert_eq!(link.trigger_player, 0, "trigger_player should be 0");
+            assert_eq!(link.check_player, 0, "check_player should be 0");
+            assert_eq!(link.evt_player, 0, "evt_player should be 0");
+            assert_eq!(link.evt_value, 0, "evt_value should be 0");
+            assert_eq!(link.evt_reason, 0, "evt_reason should be 0");
+            assert_eq!(link.evt_r_player, 0, "evt_r_player should be 0");
+            assert!(link.evt_group.is_some(), "evt_group should be Some");
+            assert!(link.target_cards.is_some(), "target_cards should be Some");
+            
+            // Verify the group contains our card
+            if let Some(ref group) = link.evt_group {
+                assert!(group.0.contains(&card_id), "Group should contain our card");
+            }
         }
     }
 }
