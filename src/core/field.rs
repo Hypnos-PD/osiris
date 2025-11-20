@@ -31,7 +31,8 @@ impl Field {
     pub fn add_card(&mut self, player: u8, location: Location, card: CardId, sequence: u8) {
         let p = player as usize;
         if location.contains(Location::DECK) {
-            self.deck[p].push(card);
+            // Insert at beginning to match C++ deck order (last card added is at position 0)
+            self.deck[p].insert(0, card);
         } else if location.contains(Location::HAND) {
             self.hand[p].push(card);
         } else if location.contains(Location::GRAVE) {

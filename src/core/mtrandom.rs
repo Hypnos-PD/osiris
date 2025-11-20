@@ -67,13 +67,17 @@ impl Mt19937 {
         while (x as u64) < bound {
             x = self.gen_u32();
         }
-        min + (x % range)
+        let result = min + (x % range);
+        println!("get_next_integer({}, {}) -> range={}, bound={}, x={}, result={}", min, max, range, bound, x, result);
+        result
     }
 
     pub fn shuffle_vector<T>(&mut self, v: &mut Vec<T>, first: usize, last: usize) {
         let last = if last > v.len() { v.len() } else { last };
+        println!("Shuffling vector from {} to {}", first, last);
         for i in first..(last.saturating_sub(1)) {
             let r = self.get_next_integer(i as u32, (last - 1) as u32) as usize;
+            println!("  Swap {} with {} (range: {} to {})", i, r, i, last - 1);
             v.swap(i, r);
         }
     }
@@ -107,5 +111,22 @@ mod tests {
         let second = mt.gen_u32();
         assert_eq!(first, 1608637542);
         assert_eq!(second, 3421126067);
+    }
+
+    #[test]
+    fn test_shuffle_algorithm() {
+        let seed: u32 = 42;
+        let mut mt = Mt19937::new(seed);
+        
+        // Test shuffle with same deck as in the test
+        let mut deck = vec![100, 200, 300, 400, 500, 600, 700];
+        let original = deck.clone();
+        println!("Before shuffle: {:?}", deck);
+        let deck_len = deck.len();
+        mt.shuffle_vector(&mut deck, 0, deck_len);
+        println!("After shuffle: {:?}", deck);
+        
+        // The deck should be shuffled
+        assert_ne!(deck, original);
     }
 }
