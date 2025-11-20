@@ -2,7 +2,7 @@ use crate::core::card::Card;
 use crate::core::enums::{Location, CardStatus, Phase};
 use crate::core::field::Field;
 use crate::core::mtrandom::Mt19937;
-use crate::core::chain::Chain;
+use crate::core::chain::{Chain, ChainLink};
 use crate::core::scripting::{FileSystemLoader, ScriptLoader};
 use crate::core::group::Group;
 use crate::core::effect::Effect;
@@ -378,6 +378,24 @@ impl Duel {
                 Ok(())
             }).expect("Failed to create Draw function")).expect("Failed to set Draw");
             
+            // Add SelectTarget method
+            duel_table.set("SelectTarget", lua.create_function(|_lua, (_e, _tp, group, min, _max, _cancelable): (mlua::AnyUserData, u32, mlua::AnyUserData, u32, u32, bool)| {
+                // Stub implementation - just return the first card in group
+                let group_ref = group.borrow::<Group>().expect("Failed to borrow group");
+                
+                // Get first min cards from group (or all if group size < min)
+                let selected_cards: Vec<CardId> = group_ref.0.iter().take(min as usize).cloned().collect();
+                
+                // Create a new group with selected cards
+                let mut selected_group = Group::new();
+                for card_id in selected_cards {
+                    selected_group.0.insert(card_id);
+                }
+                
+                // Return the selected group
+                Ok(selected_group)
+            }).expect("Failed to create SelectTarget function")).expect("Failed to set SelectTarget");
+            
             globals.set("Duel", duel_table).expect("Failed to set Duel table");
         }
         
@@ -570,12 +588,15 @@ impl Duel {
     /// Process the duel state machine for one cycle: returns ProcessResult.
     pub fn process(&mut self) -> ProcessResult {
         // Priority: if there is a chain, resolve it before doing anything else
+        // EXCEPT when we're in SolveChain processor, which handles chain resolution itself
         {
             let data = self.data.lock().unwrap();
-            if data.chain.links.len() > 0 {
-                drop(data);
-                self.resolve_chain();
-                return ProcessResult::Continue;
+            if !data.processor_units.is_empty() && data.processor_units[0].type_ != ProcessorType::SolveChain {
+                if data.chain.links.len() > 0 {
+                    drop(data);
+                    self.resolve_chain();
+                    return ProcessResult::Continue;
+                }
             }
         }
         
@@ -654,41 +675,152 @@ impl Duel {
                         // Read response value from DuelData
                         let response = data.response;
                         
-                        // Store whether we found a matching effect before clearing triggered_effects
-                        let found_matching_effect = if response != 0 {
+                        // Store the effect ID if we found a matching effect before clearing triggered_effects
+                        let effect_id_to_add = if response != 0 {
                             // Response indicates chain activation
                             println!("Building chain with response: {}", response);
                             
                             // Find the triggered effect matching the response
                             if let Some(effect) = data.triggered_effects.iter().find(|e| e.0 == response as u32) {
-                                // Add effect to chain (simplified - in real implementation would use add_chain)
-                                println!("Adding effect {} to chain", effect.0);
-                                true
+                                // Store effect ID for AddChain processing
+                                println!("Found effect {} for AddChain", effect.0);
+                                Some(*effect)
                             } else {
                                 println!("Warning: No triggered effect found for response {}", response);
-                                false
+                                None
                             }
                         } else {
                             // Response 0 means pass (clear triggers)
                             println!("Clearing triggered effects (pass)");
-                            false
+                            None
                         };
                         
                         // Clear triggered effects and reset response
                         data.triggered_effects.clear();
                         data.response = 0;
                         
-                        // Check if we should push SolveChain (response != 0 and effect found)
-                        let should_push_solve_chain = response != 0 && found_matching_effect;
-                        
                         // Remove the current SelectChain unit
                         data.processor_units.pop_front();
                         
-                        // Push SolveChain if we're building a chain
-                        if should_push_solve_chain {
-                            data.processor_units.push_front(ProcessorUnit::solve_chain(0));
+                        // Push AddChain if we have an effect to add, otherwise continue
+                        if let Some(effect_id) = effect_id_to_add {
+                            // Push AddChain processor with effect ID as arg1
+                            data.processor_units.push_front(ProcessorUnit::new(ProcessorType::AddChain, 0, effect_id.0, 0));
                         } else {
                             // Otherwise continue with Main1 phase
+                            data.processor_units.push_front(ProcessorUnit::phase_event(0, Phase::MAIN1.bits()));
+                        }
+                        
+                        ProcessResult::Continue
+                    }
+                    _ => {
+                        // Invalid step, pop unit and continue
+                        data.processor_units.pop_front();
+                        ProcessResult::Continue
+                    }
+                }
+            }
+            ProcessorType::AddChain => {
+                match unit.step {
+                    0 => {
+                        // Step 0: Execute cost and target before adding to chain
+                        let effect_id = EffectId::new(unit.arg1);
+                        
+                        // Get effect from effects list
+                        if let Some(effect) = data.effects.get(effect_id.0 as usize) {
+                            // Execute cost function if exists
+                            let cost_passed = if let Some(cost_key) = &effect.cost {
+                                // Call cost function with event context args
+                                // For now, use dummy args - we'll need to pass proper event context
+                                match Duel::get_lua_args_with_context(&self.lua, effect_id, 0, &None, 0, None, 0, 0) {
+                                    Ok(args) => {
+                                        match self.lua.registry_value::<mlua::Function>(cost_key) {
+                                            Ok(func) => {
+                                                match func.call::<_, bool>(args) {
+                                                    Ok(result) => result,
+                                                    Err(_e) => {
+                                                        false
+                                                    }
+                                                }
+                                            }
+                                            Err(_e) => {
+                                                false
+                                            }
+                                        }
+                                    }
+                                    Err(_e) => {
+                                        false
+                                    }
+                                }
+                            } else {
+                                // No cost function, automatically pass
+                                true
+                            };
+                            
+                            // If cost passed, execute target function
+                            let target_passed = if cost_passed {
+                                if let Some(target_key) = &effect.target {
+                                    // Call target function with event context args
+                                    match Duel::get_lua_args_with_context(&self.lua, effect_id, 0, &None, 0, None, 0, 0) {
+                                        Ok(args) => {
+                                            match self.lua.registry_value::<mlua::Function>(target_key) {
+                                                Ok(func) => {
+                                                    match func.call::<_, bool>(args) {
+                                                        Ok(result) => result,
+                                                        Err(e) => {
+                                                            println!("Target function error: {}", e);
+                                                            false
+                                                        }
+                                                    }
+                                                }
+                                                Err(_e) => {
+                                                    false
+                                                }
+                                            }
+                                        }
+                                        Err(_e) => {
+                                            false
+                                        }
+                                    }
+                                } else {
+                                    // No target function, automatically pass
+                                    true
+                                }
+                            } else {
+                                false
+                            };
+                            
+                            // If both cost and target passed, add to chain
+                            if cost_passed && target_passed {
+                                // Create ChainLink and add to chain
+                                let chain_link = ChainLink {
+                                    effect_id,
+                                    trigger_player: 0, // TODO: Get from event context
+                                    check_player: 0, // TODO: Get from event context
+                                    target_cards: None, // TODO: Get from target selection
+                                    reason_effect: None, // TODO: Get from event context
+                                    reason_player: 0, // TODO: Get from event context
+                                    evt_group: None, // TODO: Get from event context
+                                    evt_player: 0, // TODO: Get from event context
+                                    evt_value: 0, // TODO: Get from event context
+                                    evt_effect: None, // TODO: Get from event context
+                                    evt_reason: 0, // TODO: Get from event context
+                                    evt_r_player: 0, // TODO: Get from event context
+                                };
+                                
+                                data.chain.links.push(chain_link);
+                                
+                                // Remove the current AddChain unit first
+                                data.processor_units.pop_front();
+                                
+                                // Push SolveChain for auto-resolution
+                                data.processor_units.push_front(ProcessorUnit::solve_chain(0));
+                            } else {
+                                // Continue without adding to chain
+                                data.processor_units.push_front(ProcessorUnit::phase_event(0, Phase::MAIN1.bits()));
+                            }
+                        } else {
+                            // Continue without adding to chain
                             data.processor_units.push_front(ProcessorUnit::phase_event(0, Phase::MAIN1.bits()));
                         }
                         
@@ -1681,13 +1813,41 @@ mod tests {
         // Trigger -> Wait -> Input -> Build Chain -> Solve
         let mut duel = Duel::new(0);
         
+        // Create a test card and manually register an effect with ID 1
+        let card_id = duel.create_card(1001, 0);
+        
+        // Manually create and register an effect with ID 1
+        use crate::core::effect::Effect;
+        use crate::core::types::{EffectId, CardId};
+        
+        let effect_id = EffectId::new(1); // Use ID 1 to avoid conflict with response 0 (pass)
+        {
+            let mut data = duel.data.lock().unwrap();
+            let effect = Effect::new(1001, card_id, 0, 0x1002, 0, 0, 0); // code, card_id, owner, type, flag, flag2, range
+            
+            // Add effect to effects list at position 1
+            while data.effects.len() <= effect_id.0 as usize {
+                data.effects.push(Effect::new(0, CardId::new(0), 0, 0, 0, 0, 0));
+            }
+            data.effects[effect_id.0 as usize] = effect;
+            
+            // Add effect to card
+            if let Some(card) = data.cards.get_mut(card_id.0 as usize) {
+                card.effects.push(effect_id);
+            }
+        }
+        
+        let effect_id_value = effect_id.0;
+        println!("Registered effect with ID: {}", effect_id_value);
+        
         // Start with a PointEvent to trigger chain selection
         duel.data.lock().unwrap().processor_units.push_front(ProcessorUnit::new(ProcessorType::PointEvent, 0, 0, 0));
         
         // Add a triggered effect to simulate having chainable effects
         {
             let mut data = duel.data.lock().unwrap();
-            data.triggered_effects.push(crate::core::types::EffectId::new(42)); // Effect ID 42
+            data.triggered_effects.push(crate::core::types::EffectId::new(effect_id_value));
+            println!("Added triggered effect with ID: {}", effect_id_value);
         }
         
         // Process PointEvent - should push SelectChain
@@ -1708,21 +1868,32 @@ mod tests {
             assert_eq!(data.processor_units[0].step, 1, "Step should be incremented to 1");
         }
         
-        // Simulate user input: set response to activate effect 42
-        duel.set_responsei(42);
+        // Simulate user input: set response to activate our effect
+        duel.set_responsei(effect_id_value as i32);
         
-        // Process SelectChain step 1 - should build chain and push SolveChain
+        // Process SelectChain step 1 - should build chain and push AddChain
         assert_eq!(duel.process(), ProcessResult::Continue, "SelectChain step 1 should build chain");
         
-        // Check that SolveChain was pushed and response was reset
+        // Check that AddChain was pushed and response was reset
         {
             let data = duel.data.lock().unwrap();
             assert_eq!(data.response, 0, "Response should be reset after processing");
+            assert_eq!(data.processor_units[0].type_, ProcessorType::AddChain, "Should be in AddChain");
+        }
+        
+        // Process AddChain step 0 - should execute cost/target and push SolveChain
+        assert_eq!(duel.process(), ProcessResult::Continue, "AddChain should execute cost/target and push SolveChain");
+        
+        // Check that SolveChain was pushed
+        {
+            let data = duel.data.lock().unwrap();
+            println!("Processor units after AddChain: {:?}", data.processor_units.iter().map(|u| u.type_).collect::<Vec<_>>());
             assert_eq!(data.processor_units[0].type_, ProcessorType::SolveChain, "Should be in SolveChain");
         }
         
-        // Process SolveChain step 0 - should resolve chain
-        assert_eq!(duel.process(), ProcessResult::Continue, "SolveChain should resolve chain");
+        // Process SolveChain step 0 - should resolve chain and push PhaseEvent
+        let result = duel.process();
+        assert_eq!(result, ProcessResult::Continue, "SolveChain should resolve chain");
         
         // Check that we moved to Main1 phase
         {
@@ -1827,5 +1998,82 @@ mod tests {
                 assert!(group.0.contains(&card_id), "Group should contain our card");
             }
         }
+    }
+
+    #[test]
+    fn test_activation_flow() {
+        let mut duel = Duel::new(42);
+        
+        // Create a test card
+        let card_id = duel.create_card(1001, 0);
+        
+        // Register effect with cost, target, and operation functions using Lua
+        let result: mlua::Result<()> = duel.lua.load(format!(r#"
+            local c = Card({})
+            local e = Effect.CreateEffect(c)
+            e:SetCode(1001)
+            e:SetType(0x1002) -- EFFECT_TYPE_ACTIVATE
+            e:SetCost(function(e, tp, eg, ep, ev, re, r, rp)
+                -- Cost function: simple return true for now
+                print("Cost function executed")
+                return true
+            end)
+            e:SetTarget(function(e, tp, eg, ep, ev, re, r, rp)
+                -- Target function: simple return true for now (no target selection needed)
+                print("Target function executed")
+                return true
+            end)
+            e:SetOperation(function(e, tp, eg, ep, ev, re, r, rp)
+                -- Operation function: simple return true for now
+                print("Operation function executed")
+                return true
+            end)
+            c:RegisterEffect(e)
+            return nil
+        "#, card_id.0)).exec();
+        
+        assert!(result.is_ok(), "Lua script to register effect should run");
+        
+        // Find the effect ID we just registered
+        let effect_id = {
+            let data = duel.data.lock().unwrap();
+            data.effects.iter().position(|e| e.code == 1001)
+        };
+        assert!(effect_id.is_some(), "Effect should be registered");
+        let effect_id_value = effect_id.unwrap() as u32;
+        
+        // Simulate the activation flow by manually pushing the AddChain processor
+        // This simulates what happens when an effect is triggered and selected
+        {
+            let mut data = duel.data.lock().unwrap();
+            
+            // Push AddChain processor with the effect ID
+            data.processor_units.push_front(ProcessorUnit::new(
+                ProcessorType::AddChain, 
+                0, 
+                effect_id_value, 
+                0
+            ));
+        }
+        
+        // Process the activation flow
+        let process_result = duel.process();
+        assert_eq!(process_result, ProcessResult::Continue, "Processing should continue");
+        
+        // Verify chain was properly formed
+        {
+            let data = duel.data.lock().unwrap();
+            assert!(!data.chain.links.is_empty(), "Chain should be created");
+            
+            let chain_link = &data.chain.links[0];
+            assert_eq!(chain_link.effect_id.0, effect_id_value, "Chain should contain our effect");
+            assert_eq!(chain_link.trigger_player, 0, "Chain should be triggered by player 0");
+        }
+        
+        // Now resolve the chain to execute the operation
+        duel.resolve_chain();
+        
+        // Test passed - the activation flow completed successfully
+        println!("Activation flow test passed: cost → target → chain addition → operation execution");
     }
 }

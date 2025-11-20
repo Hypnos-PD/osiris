@@ -53,6 +53,8 @@ pub enum ProcessorType {
     ResolveChain,
     /// Solve chain (process chain resolution)
     SolveChain,
+    /// Add chain (execute cost and target before adding to chain)
+    AddChain,
 }
 
 /// A processor unit representing a discrete processing step
