@@ -51,6 +51,8 @@ pub enum ProcessorType {
     ActivateEffect,
     /// Resolve chain
     ResolveChain,
+    /// Solve chain (process chain resolution)
+    SolveChain,
 }
 
 /// A processor unit representing a discrete processing step
@@ -85,5 +87,10 @@ impl ProcessorUnit {
     /// Create a phase event processor unit
     pub fn phase_event(step: u32, phase: u32) -> Self {
         Self::new(ProcessorType::PhaseEvent, step, phase, 0)
+    }
+
+    /// Create a solve chain processor unit
+    pub fn solve_chain(step: u32) -> Self {
+        Self::new(ProcessorType::SolveChain, step, 0, 0)
     }
 }

@@ -30,6 +30,7 @@ pub struct DuelData {
     pub effects: Vec<Effect>,
     pub triggered_effects: Vec<EffectId>,
     pub database: std::sync::Arc<std::sync::Mutex<Database>>,
+    pub response: i32,
 }
 
 impl DuelData {
@@ -392,7 +393,8 @@ impl Duel {
             lp: [8000, 8000],
             effects: Vec::new(),
             triggered_effects: Vec::new(),
-                database: db_arc,
+            database: db_arc,
+            response: 0,
         }));
         
         // Inject state into Lua
@@ -626,22 +628,75 @@ impl Duel {
                         ProcessResult::Waiting
                     }
                     1 => {
-                        // Step 1: Handle response (stub)
-                        // For testing, if arg1 is provided, add to chain; otherwise clear triggers
-                        if unit.arg1 > 0 {
-                            // Simulate adding effect to chain (stub)
-                            println!("Adding effect {} to chain", unit.arg1);
+                        // Step 1: Handle response and build chain
+                        // Read response value from DuelData
+                        let response = data.response;
+                        
+                        // Store whether we found a matching effect before clearing triggered_effects
+                        let found_matching_effect = if response != 0 {
+                            // Response indicates chain activation
+                            println!("Building chain with response: {}", response);
+                            
+                            // Find the triggered effect matching the response
+                            if let Some(effect) = data.triggered_effects.iter().find(|e| e.0 == response as u32) {
+                                // Add effect to chain (simplified - in real implementation would use add_chain)
+                                println!("Adding effect {} to chain", effect.0);
+                                true
+                            } else {
+                                println!("Warning: No triggered effect found for response {}", response);
+                                false
+                            }
                         } else {
-                            // Simulate passing (clear triggers)
-                            println!("Clearing triggered effects");
+                            // Response 0 means pass (clear triggers)
+                            println!("Clearing triggered effects (pass)");
+                            false
+                        };
+                        
+                        // Clear triggered effects and reset response
+                        data.triggered_effects.clear();
+                        data.response = 0;
+                        
+                        // Check if we should push SolveChain (response != 0 and effect found)
+                        let should_push_solve_chain = response != 0 && found_matching_effect;
+                        
+                        // Remove the current SelectChain unit
+                        data.processor_units.pop_front();
+                        
+                        // Push SolveChain if we're building a chain
+                        if should_push_solve_chain {
+                            data.processor_units.push_front(ProcessorUnit::solve_chain(0));
+                        } else {
+                            // Otherwise continue with Main1 phase
+                            data.processor_units.push_front(ProcessorUnit::phase_event(0, Phase::MAIN1.bits()));
                         }
                         
-                        // Clear triggered effects and pop unit
-                        data.triggered_effects.clear();
+                        ProcessResult::Continue
+                    }
+                    _ => {
+                        // Invalid step, pop unit and continue
+                        data.processor_units.pop_front();
+                        ProcessResult::Continue
+                    }
+                }
+            }
+            ProcessorType::SolveChain => {
+                match unit.step {
+                    0 => {
+                        // Step 0: Resolve the chain
+                        
+                        // Pop SolveChain unit first
                         data.processor_units.pop_front();
                         
                         // Push Main1 phase to continue the turn
                         data.processor_units.push_front(ProcessorUnit::phase_event(0, Phase::MAIN1.bits()));
+                        
+                        // Drop the data lock before calling resolve_chain
+                        drop(data);
+                        
+                        // Call resolve_chain to process the chain
+                        self.resolve_chain();
+                        
+                        // Continue processing
                         ProcessResult::Continue
                     }
                     _ => {
@@ -791,6 +846,12 @@ impl Duel {
     pub fn draw(&mut self, player: u8, count: u32) {
         let mut data = self.data.lock().unwrap();
         data.draw(player, count);
+    }
+
+    /// Set response value for interactive processor units
+    pub fn set_responsei(&self, resp: i32) {
+        let mut data = self.data.lock().unwrap();
+        data.response = resp;
     }
 
     // Note: get_card and get_card_mut are now available through DuelData::get_card
@@ -1587,6 +1648,98 @@ mod tests {
             let data = duel.data.lock().unwrap();
             assert!(data.triggered_effects.is_empty(), "Triggered effects should be cleared");
             assert!(!data.processor_units.is_empty(), "Should have processor units");
+            assert_eq!(data.processor_units[0].type_, ProcessorType::PhaseEvent, "Should be in PhaseEvent");
+            assert_eq!(data.processor_units[0].arg1, Phase::MAIN1.bits(), "Should be in Main1 phase");
+        }
+    }
+
+    #[test]
+    fn interactive_chain_resolution_flow() {
+        // Test the full interactive chain resolution flow:
+        // Trigger -> Wait -> Input -> Build Chain -> Solve
+        let mut duel = Duel::new(0);
+        
+        // Start with a PointEvent to trigger chain selection
+        duel.data.lock().unwrap().processor_units.push_front(ProcessorUnit::new(ProcessorType::PointEvent, 0, 0, 0));
+        
+        // Add a triggered effect to simulate having chainable effects
+        {
+            let mut data = duel.data.lock().unwrap();
+            data.triggered_effects.push(crate::core::types::EffectId::new(42)); // Effect ID 42
+        }
+        
+        // Process PointEvent - should push SelectChain
+        assert_eq!(duel.process(), ProcessResult::Continue, "PointEvent -> SelectChain");
+        
+        // Check that SelectChain was pushed
+        {
+            let data = duel.data.lock().unwrap();
+            assert_eq!(data.processor_units[0].type_, ProcessorType::SelectChain, "Should be in SelectChain");
+        }
+        
+        // Process SelectChain step 0 - should return Waiting
+        assert_eq!(duel.process(), ProcessResult::Waiting, "SelectChain step 0 should wait for input");
+        
+        // Check that step was incremented
+        {
+            let data = duel.data.lock().unwrap();
+            assert_eq!(data.processor_units[0].step, 1, "Step should be incremented to 1");
+        }
+        
+        // Simulate user input: set response to activate effect 42
+        duel.set_responsei(42);
+        
+        // Process SelectChain step 1 - should build chain and push SolveChain
+        assert_eq!(duel.process(), ProcessResult::Continue, "SelectChain step 1 should build chain");
+        
+        // Check that SolveChain was pushed and response was reset
+        {
+            let data = duel.data.lock().unwrap();
+            assert_eq!(data.response, 0, "Response should be reset after processing");
+            assert_eq!(data.processor_units[0].type_, ProcessorType::SolveChain, "Should be in SolveChain");
+        }
+        
+        // Process SolveChain step 0 - should resolve chain
+        assert_eq!(duel.process(), ProcessResult::Continue, "SolveChain should resolve chain");
+        
+        // Check that we moved to Main1 phase
+        {
+            let data = duel.data.lock().unwrap();
+            assert_eq!(data.processor_units[0].type_, ProcessorType::PhaseEvent, "Should be in PhaseEvent");
+            assert_eq!(data.processor_units[0].arg1, Phase::MAIN1.bits(), "Should be in Main1 phase");
+        }
+    }
+
+    #[test]
+    fn select_chain_pass_flow() {
+        // Test the pass flow: Trigger -> Wait -> Pass -> Clear triggers
+        let mut duel = Duel::new(0);
+        
+        // Start with a PointEvent to trigger chain selection
+        duel.data.lock().unwrap().processor_units.push_front(ProcessorUnit::new(ProcessorType::PointEvent, 0, 0, 0));
+        
+        // Add a triggered effect
+        {
+            let mut data = duel.data.lock().unwrap();
+            data.triggered_effects.push(crate::core::types::EffectId::new(42));
+        }
+        
+        // Process PointEvent -> SelectChain
+        assert_eq!(duel.process(), ProcessResult::Continue);
+        
+        // Process SelectChain step 0 -> Waiting
+        assert_eq!(duel.process(), ProcessResult::Waiting);
+        
+        // Simulate user passing (response = 0)
+        duel.set_responsei(0);
+        
+        // Process SelectChain step 1 - should clear triggers without building chain
+        assert_eq!(duel.process(), ProcessResult::Continue);
+        
+        // Check that triggers were cleared and we moved to Main1
+        {
+            let data = duel.data.lock().unwrap();
+            assert!(data.triggered_effects.is_empty(), "Triggered effects should be cleared");
             assert_eq!(data.processor_units[0].type_, ProcessorType::PhaseEvent, "Should be in PhaseEvent");
             assert_eq!(data.processor_units[0].arg1, Phase::MAIN1.bits(), "Should be in Main1 phase");
         }
