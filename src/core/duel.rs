@@ -588,9 +588,9 @@ impl Duel {
                     let lua = &self.lua;
                     let data_arc = self.data.clone();
                     Duel::raise_event_static(lua, data_arc, crate::core::enums::EVENT_DRAW, None, turn_player, None);
-                    // Push next phase
+                    // Push PointEvent to check for triggers before Main1
                     let mut data = self.data.lock().unwrap();
-                    data.processor_units.push_front(ProcessorUnit::phase_event(0, Phase::MAIN1.bits()));
+                    data.processor_units.push_front(ProcessorUnit::new(ProcessorType::PointEvent, 0, 0, 0));
                     ProcessResult::Continue
                 } else if phase_bits == Phase::MAIN1.bits() || phase_bits == Phase::MAIN2.bits() {
                     // For now, just wait for player input
@@ -599,6 +599,56 @@ impl Duel {
                     // Unhandled phase, just pop and continue
                     data.processor_units.pop_front();
                     ProcessResult::Continue
+                }
+            }
+            ProcessorType::PointEvent => {
+                // Check triggered_effects
+                if data.triggered_effects.is_empty() {
+                    // No triggered effects, pop unit and continue
+                    data.processor_units.pop_front();
+                    ProcessResult::Continue
+                } else {
+                    // Has triggered effects, pop PointEvent and push SelectChain unit
+                    data.processor_units.pop_front();
+                    data.processor_units.push_front(ProcessorUnit::new(ProcessorType::SelectChain, 0, 0, 0));
+                    ProcessResult::Continue
+                }
+            }
+            ProcessorType::SelectChain => {
+                match unit.step {
+                    0 => {
+                        // Step 0: Construct MSG_SELECT_CHAIN packet (stub)
+                        println!("MSG_SELECT_CHAIN: triggered effects available");
+                        
+                        // For now, simulate waiting for client response
+                        // In real implementation, this would send packet and wait
+                        unit.step = 1;
+                        ProcessResult::Waiting
+                    }
+                    1 => {
+                        // Step 1: Handle response (stub)
+                        // For testing, if arg1 is provided, add to chain; otherwise clear triggers
+                        if unit.arg1 > 0 {
+                            // Simulate adding effect to chain (stub)
+                            println!("Adding effect {} to chain", unit.arg1);
+                        } else {
+                            // Simulate passing (clear triggers)
+                            println!("Clearing triggered effects");
+                        }
+                        
+                        // Clear triggered effects and pop unit
+                        data.triggered_effects.clear();
+                        data.processor_units.pop_front();
+                        
+                        // Push Main1 phase to continue the turn
+                        data.processor_units.push_front(ProcessorUnit::phase_event(0, Phase::MAIN1.bits()));
+                        ProcessResult::Continue
+                    }
+                    _ => {
+                        // Invalid step, pop unit and continue
+                        data.processor_units.pop_front();
+                        ProcessResult::Continue
+                    }
                 }
             }
             _ => {
@@ -1483,5 +1533,62 @@ mod tests {
         let data = duel.data.lock().unwrap();
         let card = data.get_card(card_id).expect("card exists");
         assert!(card.location.contains(Location::GRAVE), "Card should be moved to grave by operation");
+    }
+
+    #[test]
+    fn test_processor_event_integration() {
+        let mut duel = Duel::new(1);
+        
+        // Run processor through draw phase
+        // Start -> Turn -> Draw -> PointEvent
+        assert_eq!(duel.process(), ProcessResult::Continue, "Turn -> Draw");
+        assert_eq!(duel.process(), ProcessResult::Continue, "Draw -> PointEvent");
+        
+        // Check that we're in PointEvent
+        {
+            let data = duel.data.lock().unwrap();
+            assert!(!data.processor_units.is_empty(), "Should have processor units");
+            assert_eq!(data.processor_units[0].type_, ProcessorType::PointEvent, "Should be in PointEvent");
+        }
+        
+        // Add a triggered effect to simulate EVENT_DRAW trigger
+        {
+            let mut data = duel.data.lock().unwrap();
+            // Just push a dummy EffectId to simulate having triggered effects
+            data.triggered_effects.push(crate::core::types::EffectId::new(1));
+        }
+        
+        // Process PointEvent - should push SelectChain
+        assert_eq!(duel.process(), ProcessResult::Continue, "PointEvent -> SelectChain");
+        
+        // Check that SelectChain was pushed
+        {
+            let data = duel.data.lock().unwrap();
+            assert!(!data.processor_units.is_empty(), "Should have processor units");
+            assert_eq!(data.processor_units[0].type_, ProcessorType::SelectChain, "Should be in SelectChain");
+        }
+        
+        // Process SelectChain step 0 - should return Waiting
+        assert_eq!(duel.process(), ProcessResult::Waiting, "SelectChain step 0 should wait");
+        
+        // Check that step was incremented
+        {
+            let data = duel.data.lock().unwrap();
+            assert!(!data.processor_units.is_empty(), "Should have processor units");
+            assert_eq!(data.processor_units[0].type_, ProcessorType::SelectChain, "Should still be in SelectChain");
+            assert_eq!(data.processor_units[0].step, 1, "Step should be incremented to 1");
+        }
+        
+        // Process SelectChain step 1 - should clear triggers and continue
+        assert_eq!(duel.process(), ProcessResult::Continue, "SelectChain step 1 should continue");
+        
+        // Check that triggers were cleared and we moved to Main1
+        {
+            let data = duel.data.lock().unwrap();
+            assert!(data.triggered_effects.is_empty(), "Triggered effects should be cleared");
+            assert!(!data.processor_units.is_empty(), "Should have processor units");
+            assert_eq!(data.processor_units[0].type_, ProcessorType::PhaseEvent, "Should be in PhaseEvent");
+            assert_eq!(data.processor_units[0].arg1, Phase::MAIN1.bits(), "Should be in Main1 phase");
+        }
     }
 }
