@@ -493,21 +493,34 @@ impl Duel {
             }).expect("Failed to create SetOperationInfo function")).expect("Failed to set SetOperationInfo");
             
             // Add GetChainInfo method
-            duel_table.set("GetChainInfo", lua.create_function(|lua, param: u32| {
+            // Add GetChainInfo method
+            duel_table.set("GetChainInfo", lua.create_function(|lua, (chain_index, param): (u32, u32)| {
                 // Get DuelData from Lua app data
                 let data = lua.app_data_ref::<Arc<Mutex<DuelData>>>()
                     .expect("DuelData not found in Lua app data");
                 let data_guard = data.lock().unwrap();
                 
-                // Get the current chain link (if any)
-                let chain_link = if let Some(ref chain_link) = data_guard.current_chain_link {
-                    chain_link
-                } else {
-                    // If no current chain link, try to get from the active chain
-                    if let Some(active_link) = data_guard.chain.links.last() {
-                        active_link
+                // Get the chain link based on index
+                // 0 means current chain link (or last if not executing)
+                let chain_link = if chain_index == 0 {
+                    if let Some(ref chain_link) = data_guard.current_chain_link {
+                        chain_link
                     } else {
-                        // No chain link available
+                        // If no current chain link, try to get from the active chain
+                        // This is a fallback for when we are in the middle of resolving a chain
+                        // but the snapshot might have been cleared or not set yet
+                        if let Some(active_link) = data_guard.chain.links.last() {
+                            active_link
+                        } else {
+                            // No chain link available
+                            return Ok(mlua::Value::Nil);
+                        }
+                    }
+                } else {
+                    // Get specific chain link (1-based index usually, but let's assume 1-based for now to match Lua)
+                    if chain_index > 0 && chain_index as usize <= data_guard.chain.links.len() {
+                        &data_guard.chain.links[chain_index as usize - 1]
+                    } else {
                         return Ok(mlua::Value::Nil);
                     }
                 };
@@ -591,7 +604,77 @@ impl Duel {
             lua,
         };
         duel.load_core_scripts().expect("Failed to load core Lua scripts");
+        
+        // Register YGOPro constants AFTER loading constant.lua to override with our Rust values
+        {
+            let globals = duel.lua.globals();
+            Self::register_constants_to_lua(&globals).expect("Failed to register constants");
+        }
+        
         duel
+    }
+
+    /// Register YGOPro constants to Lua global scope
+    fn register_constants_to_lua(globals: &mlua::Table) -> mlua::Result<()> {
+        use crate::core::enums::*;
+        
+        // Chain Info constants
+        globals.set("CHAININFO_CHAIN_COUNT", CHAININFO_CHAIN_COUNT)?;
+        globals.set("CHAININFO_TRIGGERING_EFFECT", CHAININFO_TRIGGERING_EFFECT)?;
+        globals.set("CHAININFO_TRIGGERING_PLAYER", CHAININFO_TRIGGERING_PLAYER)?;
+        globals.set("CHAININFO_TRIGGERING_CONTROLER", CHAININFO_TRIGGERING_CONTROLER)?;
+        globals.set("CHAININFO_TRIGGERING_LOCATION", CHAININFO_TRIGGERING_LOCATION)?;
+        globals.set("CHAININFO_TRIGGERING_SEQUENCE", CHAININFO_TRIGGERING_SEQUENCE)?;
+        globals.set("CHAININFO_TARGET_CARDS", CHAININFO_TARGET_CARDS)?;
+        globals.set("CHAININFO_TARGET_PLAYER", CHAININFO_TARGET_PLAYER)?;
+        globals.set("CHAININFO_TARGET_PARAM", CHAININFO_TARGET_PARAM)?;
+        globals.set("CHAININFO_DISABLE_REASON", CHAININFO_DISABLE_REASON)?;;
+        globals.set("CHAININFO_DISABLE_PLAYER", CHAININFO_DISABLE_PLAYER)?;
+        globals.set("CHAININFO_CHAIN_ID", CHAININFO_CHAIN_ID)?;
+        globals.set("CHAININFO_CODE", CHAININFO_CODE)?;
+        globals.set("CHAININFO_TRIGGERING_CATEGORY", CHAININFO_TRIGGERING_CATEGORY)?;
+        globals.set("CHAININFO_TARGET_COUNT", CHAININFO_TARGET_COUNT)?;
+        
+        // Category constants
+        globals.set("CATEGORY_DESTROY", CATEGORY_DESTROY)?;
+        globals.set("CATEGORY_RELEASE", CATEGORY_RELEASE)?;
+        globals.set("CATEGORY_REMOVE", CATEGORY_REMOVE)?;
+        globals.set("CATEGORY_TO_GRAVE", CATEGORY_TO_GRAVE)?;
+        globals.set("CATEGORY_DECKDES", CATEGORY_DECKDES)?;
+        globals.set("CATEGORY_HANDES", CATEGORY_HANDES)?;
+        globals.set("CATEGORY_SUMMON", CATEGORY_SUMMON)?;
+        globals.set("CATEGORY_SPECIAL_SUMMON", CATEGORY_SPECIAL_SUMMON)?;
+        globals.set("CATEGORY_TOKEN", CATEGORY_TOKEN)?;
+        globals.set("CATEGORY_FLIP", CATEGORY_FLIP)?;
+        globals.set("CATEGORY_POSITION", CATEGORY_POSITION)?;
+        globals.set("CATEGORY_CONTROL", CATEGORY_CONTROL)?;
+        globals.set("CATEGORY_DISABLE", CATEGORY_DISABLE)?;
+        globals.set("CATEGORY_DISABLE_SUMMON", CATEGORY_DISABLE_SUMMON)?;
+        globals.set("CATEGORY_DRAW", CATEGORY_DRAW)?;
+        globals.set("CATEGORY_SEARCH", CATEGORY_SEARCH)?;
+        globals.set("CATEGORY_TOHAND", CATEGORY_TOHAND)?;
+        globals.set("CATEGORY_TODECK", CATEGORY_TODECK)?;
+        globals.set("CATEGORY_DAMAGE", CATEGORY_DAMAGE)?;
+        globals.set("CATEGORY_RECOVER", CATEGORY_RECOVER)?;
+        globals.set("CATEGORY_EQUIP", CATEGORY_EQUIP)?;
+        globals.set("CATEGORY_COUNTER", CATEGORY_COUNTER)?;
+        globals.set("CATEGORY_COIN", CATEGORY_COIN)?;
+        globals.set("CATEGORY_DICE", CATEGORY_DICE)?;
+        globals.set("CATEGORY_ATKCHANGE", CATEGORY_ATKCHANGE)?;
+        globals.set("CATEGORY_DEFCHANGE", CATEGORY_DEFCHANGE)?;
+        globals.set("CATEGORY_LVCHANGE", CATEGORY_LVCHANGE)?;
+        globals.set("CATEGORY_NEGATE", CATEGORY_NEGATE)?;
+        globals.set("CATEGORY_ANNOUNCE", CATEGORY_ANNOUNCE)?;
+        
+        // Effect type constants (commonly used in tests)
+        globals.set("EFFECT_TYPE_ACTIVATE", 0x0010u32)?;
+        globals.set("EFFECT_TYPE_IGNITION", 0x0040u32)?;
+        globals.set("EFFECT_FLAG_CARD_TARGET", 0x0010u32)?;
+        
+        // Reason constants (commonly used)
+        globals.set("REASON_EFFECT", 0x40u32)?;
+        
+        Ok(())
     }
 
     /// Resolve the chain: pop chain links in LIFO order and execute their operations.
@@ -603,6 +686,7 @@ impl Duel {
                 let l = data_guard.chain.pop();
                 if let Some(ref link) = l {
                     // store a snapshot of the link for GetChainInfo during operation execution
+                    println!("resolve_chain: Setting current_chain_link snapshot for effect_id={}", link.effect_id.0);
                     data_guard.current_chain_link = Some(link.clone());
                 }
                 l
@@ -613,6 +697,7 @@ impl Duel {
 
                 // Clear the temporary current_chain_link after execution
                 if let Ok(mut data_guard) = self.data.lock() {
+                    println!("resolve_chain: Clearing current_chain_link snapshot");
                     data_guard.current_chain_link = None;
                 }
             } else {
@@ -712,16 +797,41 @@ impl Duel {
             let data_guard = data_arc.lock().unwrap();
             if let Some(effect) = data_guard.effects.get(effect_id.0 as usize) {
                 if let Some(ref key) = effect.operation {
+                    println!("execute_effect_static: Found operation key for effect_id={}", effect_id.0);
                     lua.registry_value::<mlua::Function>(key).ok()
-                } else { None }
-            } else { None }
+                } else { 
+                    println!("execute_effect_static: No operation key for effect_id={}", effect_id.0);
+                    None 
+                }
+            } else { 
+                println!("execute_effect_static: Effect not found for effect_id={}", effect_id.0);
+                None 
+            }
         };
 
         if let Some(func) = op_func {
+            println!("execute_effect_static: Calling operation function for effect_id={}", effect_id.0);
             // Build arguments tuple (e, tp, eg, ep, ev, re, r, rp)
-            let args = Duel::get_lua_args_with_context(lua, effect_id, trigger_player, &event_cards, reason_player, reason_effect, event_value, event_reason)?;
-            // Call the operation function
-            let _res: mlua::Value = func.call(args)?;
+            match Duel::get_lua_args_with_context(lua, effect_id, trigger_player, &event_cards, reason_player, reason_effect, event_value, event_reason) {
+                Ok(args) => {
+                    // Call the operation function
+                    match func.call::<_, mlua::Value>(args) {
+                        Ok(_res) => {
+                            println!("execute_effect_static: Operation function returned successfully");
+                        },
+                        Err(e) => {
+                            println!("execute_effect_static: Operation function failed: {:?}", e);
+                            return Err(e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    println!("execute_effect_static: Failed to build Lua args: {:?}", e);
+                    return Err(e);
+                }
+            }
+        } else {
+            println!("execute_effect_static: No operation function to call");
         }
         Ok(())
     }
@@ -811,7 +921,7 @@ impl Duel {
             }
             ProcessorType::PhaseEvent => {
                 // Handle phase events
-                let phase_bits = unit_step;
+                let phase_bits = effect_id.0;
                 if phase_bits == Phase::DRAW.bits() {
                     // Pop the phase event and process draw
                     data.processor_units.pop_front();
@@ -932,6 +1042,7 @@ impl Duel {
                 match unit_step {
                     0 => {
                         // Step 0: Initialize current_chain_link and execute cost function
+                        println!("AddChain Step 0: effect_id={}, has_cost={}, has_target={}", effect_id.0, has_cost, has_target);
                         
                         // Initialize current_chain_link for this AddChain process
                         data.current_chain_link = Some(ChainLink {
@@ -994,6 +1105,8 @@ impl Duel {
                             effect_exists
                         };
                         
+                        println!("AddChain Step 0: cost_passed={}", cost_passed);
+                        
                         if cost_passed {
                             // Move to step 1 for target function execution
                             if let Some(unit) = data.processor_units.front_mut() {
@@ -1010,6 +1123,7 @@ impl Duel {
                     }
                     1 => {
                         // Step 1: Execute target function (where SetOperationInfo would be called)
+                        println!("AddChain Step 1: effect_id={}", effect_id.0);
                         
                         // Execute target function
                         let target_passed = if has_target {
@@ -1096,10 +1210,14 @@ impl Duel {
                             effect_exists
                         };
                         
+                        println!("AddChain Step 1: target_passed={}", target_passed);
+                        
                         if target_passed {
                             // Both cost and target passed, finalize chain link and add to chain
                             if let Some(chain_link) = data.current_chain_link.take() {
+                                println!("AddChain Step 1: Adding link to chain. Links count before: {}", data.chain.links.len());
                                 data.chain.links.push(chain_link);
+                                println!("AddChain Step 1: Links count after: {}", data.chain.links.len());
                                 
                                 // Remove the current AddChain unit first
                                 data.processor_units.pop_front();
@@ -1110,6 +1228,7 @@ impl Duel {
                                 ProcessResult::Continue
                             } else {
                                 // No current_chain_link, continue without adding to chain
+                                println!("AddChain Step 1: No current_chain_link found!");
                                 data.current_chain_link = None;
                                 data.processor_units.pop_front();
                                 data.processor_units.push_front(ProcessorUnit::phase_event(0, Phase::MAIN1.bits()));
@@ -2181,8 +2300,11 @@ mod tests {
             assert_eq!(data.processor_units[0].type_, ProcessorType::AddChain, "Should be in AddChain");
         }
         
-        // Process AddChain step 0 - should execute cost/target and push SolveChain
-        assert_eq!(duel.process(), ProcessResult::Continue, "AddChain should execute cost/target and push SolveChain");
+        // Process AddChain step 0 - should execute cost and move to step 1
+        assert_eq!(duel.process(), ProcessResult::Continue, "AddChain step 0 should continue");
+        
+        // Process AddChain step 1 - should execute target and push SolveChain
+        assert_eq!(duel.process(), ProcessResult::Continue, "AddChain step 1 should continue");
         
         // Check that SolveChain was pushed
         {
@@ -2357,8 +2479,13 @@ mod tests {
         }
         
         // Process the activation flow
+        // Step 0: Cost
         let process_result = duel.process();
-        assert_eq!(process_result, ProcessResult::Continue, "Processing should continue");
+        assert_eq!(process_result, ProcessResult::Continue, "Processing step 0 should continue");
+        
+        // Step 1: Target
+        let process_result = duel.process();
+        assert_eq!(process_result, ProcessResult::Continue, "Processing step 1 should continue");
         
         // Verify chain was properly formed
         {
@@ -2403,8 +2530,8 @@ mod tests {
             e:SetTarget(function(e,tp,eg,ep,ev,re,r,rp)
                 -- Set operation info using Duel.SetOperationInfo
                 -- Use hardcoded values since constants might not be loaded in test environment
-                Duel.SetOperationInfo(0, 0x1, nil, 1, tp, 0x8)  -- CATEGORY_DESTROY = 0x1, LOCATION_MZONE = 0x8
-                Duel.SetOperationInfo(0, 0x10000, nil, 2, tp, 0x10) -- CATEGORY_TOHAND = 0x10000, LOCATION_GRAVE = 0x10
+                Duel.SetOperationInfo(0, 0x1, nil, 1, 0, 0x8)  -- CATEGORY_DESTROY = 0x1, player=0, LOCATION_MZONE = 0x8
+                Duel.SetOperationInfo(0, 0x10000, nil, 2, 0, 0x10) -- CATEGORY_TOHAND = 0x10000, player=0, LOCATION_GRAVE = 0x10
                 return true
             end)
             
