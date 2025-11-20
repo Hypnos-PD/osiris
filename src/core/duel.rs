@@ -109,6 +109,32 @@ impl DuelData {
         }
         out
     }
+
+    /// Shuffle the specified player's deck.
+    pub fn shuffle_deck(&mut self, player: u8) {
+        self.shuffle_deck_internal(player);
+    }
+
+    fn shuffle_deck_internal(&mut self, player: u8) {
+        let p = player as usize;
+        self.random.shuffle_vector(&mut self.field.deck[p], 0, usize::MAX);
+    }
+
+    /// Draw count cards from player's deck to hand.
+    pub fn draw(&mut self, player: u8, count: u32) {
+        for _ in 0..count {
+            let p = player as usize;
+            if self.field.deck[p].is_empty() {
+                break;
+            }
+            let card_id = self.field.deck[p].remove(0);
+            self.field.hand[p].push(card_id);
+            if let Some(card) = self.cards.get_mut(card_id.0 as usize) {
+                card.location = Location::HAND;
+                card.sequence = (self.field.hand[p].len() - 1) as u8;
+            }
+        }
+    }
 }
 
 // Implement UserData for DuelData to make it accessible from Lua
@@ -196,13 +222,7 @@ impl Duel {
         println!("Duel Start");
         // Initialize LP to defaults for a duel start in case not set by load_replay
         data.lp = [8000, 8000];
-        for p in 0..2u8 {
-            // Re-enable shuffle to match ocgcore behavior
-            self.shuffle_deck_internal(&mut data, p);
-        }
-        for p in 0..2u8 {
-            self.draw_internal(&mut data, p, 5);
-        }
+        // Shuffle and draw are done by script in utility.lua BeginDuel
         data.state = ProcessorState::TurnChange;
         true
     }
@@ -376,6 +396,24 @@ impl Duel {
                 
                 Ok(0) // Failed to summon
             }).expect("Failed to create Summon function")).expect("Failed to set Summon");
+            
+            // Add ShuffleDeck method
+            duel_table.set("ShuffleDeck", lua.create_function(|lua, player: u32| {
+                let data = lua.app_data_ref::<Arc<Mutex<DuelData>>>()
+                    .expect("DuelData not found in Lua app data");
+                let mut data_guard = data.lock().unwrap();
+                data_guard.shuffle_deck(player as u8);
+                Ok(())
+            }).expect("Failed to create ShuffleDeck function")).expect("Failed to set ShuffleDeck");
+            
+            // Add Draw method
+            duel_table.set("Draw", lua.create_function(|lua, (player, count): (u32, u32)| {
+                let data = lua.app_data_ref::<Arc<Mutex<DuelData>>>()
+                    .expect("DuelData not found in Lua app data");
+                let mut data_guard = data.lock().unwrap();
+                data_guard.draw(player as u8, count);
+                Ok(())
+            }).expect("Failed to create Draw function")).expect("Failed to set Draw");
             
             globals.set("Duel", duel_table).expect("Failed to set Duel table");
         }
@@ -716,11 +754,9 @@ impl Duel {
     /// Shuffle the specified player's deck using Fisher-Yates algorithm.
     pub fn shuffle_deck(&mut self, player: u8) {
         let mut data = self.data.lock().unwrap();
-        self.shuffle_deck_internal(&mut data, player);
+        data.shuffle_deck(player);
     }
 
-    /// Get next integer in range [min, max] using rejection sampling to avoid modulo bias.
-    /// Matches C++ ocgcore get_random_integer_v2 logic exactly.
     pub fn get_next_integer(rng: &mut Mt19937, min: u32, max: u32) -> u32 {
         let range = max - min + 1;
         let neg_range = (u32::MAX as u64).wrapping_add(1).wrapping_sub(range as u64);
@@ -732,39 +768,10 @@ impl Duel {
         min + (x % range)
     }
 
-    fn shuffle_deck_internal(&self, data: &mut DuelData, player: u8) {
-        let p = player as usize;
-        let deck = &mut data.field.deck[p];
-        deck.reverse();
-    }
-
     /// Draw `count` cards from player's deck to their hand (append to hand).
     pub fn draw(&mut self, player: u8, count: u32) {
-        for _ in 0..count {
-            let data = self.data.lock().unwrap();
-            let p = player as usize;
-            if data.field.deck[p].is_empty() {
-                break;
-            }
-            // Top card is last element
-            let card_id = *data.field.deck[p].last().unwrap();
-            // Move to hand (move_card will remove from deck)
-            drop(data); // Release the lock before calling move_card
-            let _ = self.move_card(card_id, player, Location::HAND, 0);
-        }
-    }
-
-    fn draw_internal(&self, data: &mut DuelData, player: u8, count: u32) {
-        for _ in 0..count {
-            let p = player as usize;
-            if data.field.deck[p].is_empty() {
-                break;
-            }
-            // Top card is last element
-            let card_id = *data.field.deck[p].last().unwrap();
-            // Move to hand using internal move
-            let _ = self.move_card_internal(data, card_id, player, Location::HAND, 0);
-        }
+        let mut data = self.data.lock().unwrap();
+        data.draw(player, count);
     }
 
     // Note: get_card and get_card_mut are now available through DuelData::get_card

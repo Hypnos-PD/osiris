@@ -59,6 +59,24 @@ impl Mt19937 {
         y ^= y >> 18;
         y
     }
+
+    pub fn get_next_integer(&mut self, min: u32, max: u32) -> u32 {
+        let range = max - min + 1;
+        let bound = (u32::MAX as u64).wrapping_add(1).wrapping_sub(range as u64) % (range as u64);
+        let mut x = self.gen_u32();
+        while (x as u64) < bound {
+            x = self.gen_u32();
+        }
+        min + (x % range)
+    }
+
+    pub fn shuffle_vector<T>(&mut self, v: &mut Vec<T>, first: usize, last: usize) {
+        let last = if last > v.len() { v.len() } else { last };
+        for i in first..(last.saturating_sub(1)) {
+            let r = self.get_next_integer(i as u32, (last - 1) as u32) as usize;
+            v.swap(i, r);
+        }
+    }
 }
 
 #[cfg(test)]
