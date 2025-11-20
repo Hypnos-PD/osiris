@@ -10,11 +10,18 @@ use crate::core::types::EffectId;
 use crate::core::database::Database;
 use crate::core::processor::{ProcessorUnit, ProcessorType, ProcessResult};
 use std::collections::VecDeque;
+use std::cell::RefCell;
 // import Effect type (may be used for future processor logic)
 use crate::core::types::CardId;
 use mlua::{Lua, UserData};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::thread_local;
+
+// Thread-local storage for current chain link during target function execution
+thread_local! {
+    static CURRENT_CHAIN_LINK: RefCell<Option<ChainLink>> = RefCell::new(None);
+}
 
 /// DuelData holds all the game state that needs to be shared between the main loop and Lua callbacks.
 pub struct DuelData {
@@ -31,6 +38,8 @@ pub struct DuelData {
     pub triggered_effects: Vec<EffectId>,
     pub database: std::sync::Arc<std::sync::Mutex<Database>>,
     pub response: i32,
+    // Temporary storage for chain link being built during AddChain process
+    pub current_chain_link: Option<crate::core::chain::ChainLink>,
 }
 
 impl DuelData {
@@ -396,6 +405,164 @@ impl Duel {
                 Ok(selected_group)
             }).expect("Failed to create SelectTarget function")).expect("Failed to set SelectTarget");
             
+            // Add SetOperationInfo method
+            duel_table.set("SetOperationInfo", lua.create_function(|lua, (_chain_index, category, targets, count, player, param): (u32, u32, Option<mlua::AnyUserData>, u32, u32, u32)| {
+                println!("SetOperationInfo called with category: {}, count: {}, player: {}, param: {}", category, count, player, param);
+                
+                // Convert targets from Option<AnyUserData> to Option<Group>
+                let target_group = if let Some(targets_ud) = targets {
+                    if let Ok(group) = targets_ud.borrow::<Group>() {
+                        Some(group.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                
+                // Try to set operation info in thread-local storage first
+                let mut operation_set = false;
+                CURRENT_CHAIN_LINK.with(|current_chain_link_cell| {
+                    if let Some(ref mut chain_link) = *current_chain_link_cell.borrow_mut() {
+                        println!("Setting operation info in thread-local current_chain_link");
+                        // Combine categories (bitwise OR) if multiple SetOperationInfo calls
+                        chain_link.op_category |= category;
+                        
+                        // Set targets if provided
+                        if target_group.is_some() {
+                            chain_link.op_targets = target_group.clone();
+                        }
+                        
+                        // Set count if provided (use maximum if multiple calls)
+                        if count > chain_link.op_count {
+                            chain_link.op_count = count;
+                        }
+                        
+                        chain_link.op_param = param;
+                        chain_link.op_player = player as u8;
+                        
+                        println!("Operation info set: category={}, count={}, param={}, player={}", 
+                            chain_link.op_category, chain_link.op_count, chain_link.op_param, chain_link.op_player);
+                        operation_set = true;
+                    }
+                });
+                
+                // If thread-local storage didn't work, try to get DuelData from Lua app data
+                if !operation_set {
+                    if let Some(data) = lua.app_data_ref::<Arc<Mutex<DuelData>>>() {
+                        // Try to lock the data without blocking
+                        if let Ok(mut data_guard) = data.try_lock() {
+                            println!("SetOperationInfo: Data lock acquired successfully (non-blocking)");
+                            
+                            // Set operation info in current chain link
+                            if let Some(ref mut chain_link) = data_guard.current_chain_link {
+                                println!("Setting operation info in current_chain_link");
+                                // Combine categories (bitwise OR) if multiple SetOperationInfo calls
+                                chain_link.op_category |= category;
+                                
+                                // Set targets if provided
+                                if target_group.is_some() {
+                                    chain_link.op_targets = target_group;
+                                }
+                                
+                                // Set count if provided (use maximum if multiple calls)
+                                if count > chain_link.op_count {
+                                    chain_link.op_count = count;
+                                }
+                                
+                                chain_link.op_param = param;
+                                chain_link.op_player = player as u8;
+                                
+                                println!("Operation info set: category={}, count={}, param={}, player={}", 
+                                    chain_link.op_category, chain_link.op_count, chain_link.op_param, chain_link.op_player);
+                            } else {
+                                println!("WARNING: No current_chain_link available for SetOperationInfo");
+                            }
+                        } else {
+                            // If we can't get the lock, it means we're already in a locked context
+                            // This is expected when SetOperationInfo is called from process_add_chain
+                            println!("SetOperationInfo: Data already locked (expected in process_add_chain context)");
+                            println!("WARNING: Cannot set operation info when data is already locked");
+                        }
+                    } else {
+                        println!("WARNING: Could not access DuelData from Lua app data");
+                    }
+                }
+                
+                Ok(())
+            }).expect("Failed to create SetOperationInfo function")).expect("Failed to set SetOperationInfo");
+            
+            // Add GetChainInfo method
+            duel_table.set("GetChainInfo", lua.create_function(|lua, param: u32| {
+                // Get DuelData from Lua app data
+                let data = lua.app_data_ref::<Arc<Mutex<DuelData>>>()
+                    .expect("DuelData not found in Lua app data");
+                let data_guard = data.lock().unwrap();
+                
+                // Get the current chain link (if any)
+                let chain_link = if let Some(ref chain_link) = data_guard.current_chain_link {
+                    chain_link
+                } else {
+                    // If no current chain link, try to get from the active chain
+                    if let Some(active_link) = data_guard.chain.links.last() {
+                        active_link
+                    } else {
+                        // No chain link available
+                        return Ok(mlua::Value::Nil);
+                    }
+                };
+                
+                // Return different information based on the parameter
+                match param {
+                    crate::core::enums::CHAININFO_CHAIN_ID => Ok(mlua::Value::Integer(data_guard.chain.links.len() as i64)),
+                    crate::core::enums::CHAININFO_TRIGGERING_EFFECT => {
+                        if let Some(effect_id) = chain_link.evt_effect {
+                            Ok(mlua::Value::Integer(effect_id.0 as i64))
+                        } else {
+                            Ok(mlua::Value::Nil)
+                        }
+                    },
+                    crate::core::enums::CHAININFO_TRIGGERING_PLAYER => Ok(mlua::Value::Integer(chain_link.trigger_player as i64)),
+                    crate::core::enums::CHAININFO_TARGET_CARDS => {
+                        if let Some(ref target_cards) = chain_link.target_cards {
+                            let group_table = lua.create_table()?;
+                            for (i, &card_id) in target_cards.0.iter().enumerate() {
+                                group_table.set(i + 1, card_id.0 as i64)?;
+                            }
+                            Ok(mlua::Value::Table(group_table))
+                        } else {
+                            Ok(mlua::Value::Nil)
+                        }
+                    },
+                    crate::core::enums::CHAININFO_TARGET_PARAM => Ok(mlua::Value::Integer(chain_link.op_param as i64)),
+                    crate::core::enums::CHAININFO_DISABLE_REASON => Ok(mlua::Value::Integer(chain_link.evt_reason as i64)),
+                    crate::core::enums::CHAININFO_DISABLE_PLAYER => Ok(mlua::Value::Integer(chain_link.evt_r_player as i64)),
+                    crate::core::enums::CHAININFO_CHAIN_COUNT => Ok(mlua::Value::Integer(data_guard.chain.links.len() as i64)),
+                    crate::core::enums::CHAININFO_TRIGGERING_CONTROLER => Ok(mlua::Value::Integer(chain_link.trigger_player as i64)),
+                    crate::core::enums::CHAININFO_TRIGGERING_LOCATION => {
+                        // TODO: Get location from triggering card
+                        Ok(mlua::Value::Integer(0))
+                    },
+                    crate::core::enums::CHAININFO_TARGET_PLAYER => {
+                        // Return player who is the target of the operation
+                        Ok(mlua::Value::Integer(chain_link.op_player as i64))
+                    },
+                    crate::core::enums::CHAININFO_CODE => {
+                        // TODO: Get event code
+                        Ok(mlua::Value::Integer(0))
+                    },
+                    crate::core::enums::CHAININFO_TRIGGERING_CATEGORY => {
+                        // Return operation category set via SetOperationInfo
+                        Ok(mlua::Value::Integer(chain_link.op_category as i64))
+                    },
+                    crate::core::enums::CHAININFO_TARGET_COUNT => {
+                        // Return target count set via SetOperationInfo
+                        Ok(mlua::Value::Integer(chain_link.op_count as i64))
+                    },
+                    _ => Ok(mlua::Value::Nil),
+                }
+            }).expect("Failed to create GetChainInfo function")).expect("Failed to set GetChainInfo");
+            
             globals.set("Duel", duel_table).expect("Failed to set Duel table");
         }
         
@@ -413,6 +580,7 @@ impl Duel {
             triggered_effects: Vec::new(),
             database: db_arc,
             response: 0,
+            current_chain_link: None,
         }));
         
         // Inject state into Lua
@@ -429,13 +597,24 @@ impl Duel {
     /// Resolve the chain: pop chain links in LIFO order and execute their operations.
     pub fn resolve_chain(&mut self) {
         loop {
+            // Pop next link while holding the lock and set it as current_chain_link
             let next_link = {
                 let mut data_guard = self.data.lock().unwrap();
-                data_guard.chain.pop()
+                let l = data_guard.chain.pop();
+                if let Some(ref link) = l {
+                    // store a snapshot of the link for GetChainInfo during operation execution
+                    data_guard.current_chain_link = Some(link.clone());
+                }
+                l
             };
             if let Some(link) = next_link {
                 // Execute effect operation using SNAPSHOTTED event context from chain link
                 let _ = Duel::execute_effect_static(&self.lua, self.data.clone(), link.effect_id, 0u32, link.evt_group, link.evt_effect, link.evt_r_player, link.trigger_player, link.evt_value, link.evt_reason);
+
+                // Clear the temporary current_chain_link after execution
+                if let Ok(mut data_guard) = self.data.lock() {
+                    data_guard.current_chain_link = None;
+                }
             } else {
                 break;
             }
@@ -497,6 +676,11 @@ impl Duel {
                     evt_effect: reason_effect,
                     evt_reason: 0,
                     evt_r_player: reason_player,
+                    op_category: 0,
+                    op_targets: None,
+                    op_count: 0,
+                    op_param: 0,
+                    op_player: 0,
                 };
                 data_guard.chain.add(link);
             }
@@ -606,11 +790,19 @@ impl Duel {
             return ProcessResult::End;
         }
         
-        // Peek the front unit
-        let unit = data.processor_units.front_mut().unwrap();
+        // Get unit type and effect_id first before mutable operations
+        let unit_type;
+        let effect_id;
+        let unit_step;
+        {
+            let unit = data.processor_units.front().unwrap();
+            unit_type = unit.type_;
+            effect_id = EffectId::new(unit.arg1);
+            unit_step = unit.step;
+        }
         
         // Process based on unit type
-        match unit.type_ {
+        match unit_type {
             ProcessorType::Turn => {
                 // For now, just pop the turn unit and push phase events
                 data.processor_units.pop_front();
@@ -619,7 +811,7 @@ impl Duel {
             }
             ProcessorType::PhaseEvent => {
                 // Handle phase events
-                let phase_bits = unit.arg1;
+                let phase_bits = unit_step;
                 if phase_bits == Phase::DRAW.bits() {
                     // Pop the phase event and process draw
                     data.processor_units.pop_front();
@@ -660,14 +852,16 @@ impl Duel {
                 }
             }
             ProcessorType::SelectChain => {
-                match unit.step {
+                match unit_step {
                     0 => {
                         // Step 0: Construct MSG_SELECT_CHAIN packet (stub)
                         println!("MSG_SELECT_CHAIN: triggered effects available");
                         
                         // For now, simulate waiting for client response
                         // In real implementation, this would send packet and wait
-                        unit.step = 1;
+                        if let Some(unit) = data.processor_units.front_mut() {
+                            unit.step = 1;
+                        }
                         ProcessResult::Waiting
                     }
                     1 => {
@@ -721,20 +915,60 @@ impl Duel {
                 }
             }
             ProcessorType::AddChain => {
-                match unit.step {
+                // effect_id is already extracted above
+                
+                // Extract effect information in a separate scope to avoid borrowing conflicts
+                let effect_exists;
+                let has_cost;
+                let has_target;
+                {
+                    let effects_ref = &data.effects;
+                    let effect = effects_ref.get(effect_id.0 as usize);
+                    effect_exists = effect.is_some();
+                    has_cost = effect.and_then(|e| e.cost.as_ref()).is_some();
+                    has_target = effect.and_then(|e| e.target.as_ref()).is_some();
+                }
+                
+                match unit_step {
                     0 => {
-                        // Step 0: Execute cost and target before adding to chain
-                        let effect_id = EffectId::new(unit.arg1);
+                        // Step 0: Initialize current_chain_link and execute cost function
                         
-                        // Get effect from effects list
-                        if let Some(effect) = data.effects.get(effect_id.0 as usize) {
-                            // Execute cost function if exists
-                            let cost_passed = if let Some(cost_key) = &effect.cost {
+                        // Initialize current_chain_link for this AddChain process
+                        data.current_chain_link = Some(ChainLink {
+                            effect_id,
+                            trigger_player: 0, // TODO: Get from event context
+                            check_player: 0, // TODO: Get from event context
+                            target_cards: None, // TODO: Get from target selection
+                            reason_effect: None, // TODO: Get from event context
+                            reason_player: 0, // TODO: Get from event context
+                            evt_group: None, // TODO: Get from event context
+                            evt_player: 0, // TODO: Get from event context
+                            evt_value: 0, // TODO: Get from event context
+                            evt_effect: None, // TODO: Get from event context
+                            evt_reason: 0, // TODO: Get from event context
+                            evt_r_player: 0, // TODO: Get from event context
+                            op_category: 0,
+                            op_targets: None,
+                            op_count: 0,
+                            op_param: 0,
+                            op_player: 0,
+                        });
+                        
+                        // Execute cost function if exists
+                        let cost_passed = if has_cost {
+                            // Get cost function from registry
+                            let cost_key = {
+                                let effects_ref = &data.effects;
+                                effects_ref.get(effect_id.0 as usize)
+                                    .and_then(|e| e.cost.as_ref())
+                            };
+                            
+                            if let Some(cost_key) = cost_key {
                                 // Call cost function with event context args
                                 // For now, use dummy args - we'll need to pass proper event context
                                 match Duel::get_lua_args_with_context(&self.lua, effect_id, 0, &None, 0, None, 0, 0) {
                                     Ok(args) => {
-                                        match self.lua.registry_value::<mlua::Function>(cost_key) {
+                                        match self.lua.registry_value::<mlua::Function>(&cost_key) {
                                             Ok(func) => {
                                                 match func.call::<_, bool>(args) {
                                                     Ok(result) => result,
@@ -753,61 +987,118 @@ impl Duel {
                                     }
                                 }
                             } else {
-                                // No cost function, automatically pass
-                                true
+                                false
+                            }
+                        } else {
+                            // No cost function, automatically pass if effect exists
+                            effect_exists
+                        };
+                        
+                        if cost_passed {
+                            // Move to step 1 for target function execution
+                            if let Some(unit) = data.processor_units.front_mut() {
+                                unit.step = 1;
+                            }
+                            ProcessResult::Continue
+                        } else {
+                            // Cost failed or effect not found, clear current_chain_link and continue without adding to chain
+                            data.current_chain_link = None;
+                            data.processor_units.pop_front();
+                            data.processor_units.push_front(ProcessorUnit::phase_event(0, Phase::MAIN1.bits()));
+                            ProcessResult::Continue
+                        }
+                    }
+                    1 => {
+                        // Step 1: Execute target function (where SetOperationInfo would be called)
+                        
+                        // Execute target function
+                        let target_passed = if has_target {
+                            // Extract target key in a separate scope to avoid borrowing issues
+                            let target_key = {
+                                let effects_ref = &data.effects;
+                                effects_ref.get(effect_id.0 as usize)
+                                    .and_then(|e| e.target.as_ref())
                             };
                             
-                            // If cost passed, execute target function
-                            let target_passed = if cost_passed {
-                                if let Some(target_key) = &effect.target {
-                                    // Call target function with event context args
-                                    match Duel::get_lua_args_with_context(&self.lua, effect_id, 0, &None, 0, None, 0, 0) {
-                                        Ok(args) => {
-                                            match self.lua.registry_value::<mlua::Function>(target_key) {
-                                                Ok(func) => {
-                                                    match func.call::<_, bool>(args) {
-                                                        Ok(result) => result,
-                                                        Err(e) => {
-                                                            println!("Target function error: {}", e);
-                                                            false
-                                                        }
+                            if let Some(target_key) = target_key {
+                                println!("Calling target function for effect_id: {}", effect_id.0);
+                                
+                                // Set up thread-local storage for current chain link
+                                if let Some(ref chain_link) = data.current_chain_link {
+                                    CURRENT_CHAIN_LINK.with(|current_chain_link_cell| {
+                                        *current_chain_link_cell.borrow_mut() = Some(chain_link.clone());
+                                    });
+                                }
+                                
+                                // Call target function with event context args
+                                match Duel::get_lua_args_with_context(&self.lua, effect_id, 0, &None, 0, None, 0, 0) {
+                                    Ok(args) => {
+                                        match self.lua.registry_value::<mlua::Function>(&target_key) {
+                                            Ok(func) => {
+                                                match func.call::<_, bool>(args) {
+                                                    Ok(result) => {
+                                                        println!("Target function returned: {}", result);
+                                                        
+                                                        // Copy operation info from thread-local storage back to main data
+                                                        CURRENT_CHAIN_LINK.with(|current_chain_link_cell| {
+                                                            if let Some(thread_local_chain_link) = current_chain_link_cell.borrow().as_ref() {
+                                                                if let Some(ref mut main_chain_link) = data.current_chain_link {
+                                                                    main_chain_link.op_category = thread_local_chain_link.op_category;
+                                                                    main_chain_link.op_targets = thread_local_chain_link.op_targets.clone();
+                                                                    main_chain_link.op_count = thread_local_chain_link.op_count;
+                                                                    main_chain_link.op_param = thread_local_chain_link.op_param;
+                                                                    main_chain_link.op_player = thread_local_chain_link.op_player;
+                                                                    println!("Copied operation info from thread-local to main data");
+                                                                }
+                                                            }
+                                                            // Clear thread-local storage
+                                                            *current_chain_link_cell.borrow_mut() = None;
+                                                        });
+                                                        
+                                                        result
+                                                    }
+                                                    Err(e) => {
+                                                        println!("Target function error: {}", e);
+                                                        // Clear thread-local storage on error
+                                                        CURRENT_CHAIN_LINK.with(|current_chain_link_cell| {
+                                                            *current_chain_link_cell.borrow_mut() = None;
+                                                        });
+                                                        false
                                                     }
                                                 }
-                                                Err(_e) => {
-                                                    false
-                                                }
+                                            }
+                                            Err(_e) => {
+                                                println!("Failed to get target function from registry");
+                                                // Clear thread-local storage on error
+                                                CURRENT_CHAIN_LINK.with(|current_chain_link_cell| {
+                                                    *current_chain_link_cell.borrow_mut() = None;
+                                                });
+                                                false
                                             }
                                         }
-                                        Err(_e) => {
-                                            false
-                                        }
                                     }
-                                } else {
-                                    // No target function, automatically pass
-                                    true
+                                    Err(_e) => {
+                                        println!("Failed to get Lua args for target function");
+                                        // Clear thread-local storage on error
+                                        CURRENT_CHAIN_LINK.with(|current_chain_link_cell| {
+                                            *current_chain_link_cell.borrow_mut() = None;
+                                        });
+                                        false
+                                    }
                                 }
                             } else {
+                                println!("No target key found for effect_id: {}", effect_id.0);
                                 false
-                            };
-                            
-                            // If both cost and target passed, add to chain
-                            if cost_passed && target_passed {
-                                // Create ChainLink and add to chain
-                                let chain_link = ChainLink {
-                                    effect_id,
-                                    trigger_player: 0, // TODO: Get from event context
-                                    check_player: 0, // TODO: Get from event context
-                                    target_cards: None, // TODO: Get from target selection
-                                    reason_effect: None, // TODO: Get from event context
-                                    reason_player: 0, // TODO: Get from event context
-                                    evt_group: None, // TODO: Get from event context
-                                    evt_player: 0, // TODO: Get from event context
-                                    evt_value: 0, // TODO: Get from event context
-                                    evt_effect: None, // TODO: Get from event context
-                                    evt_reason: 0, // TODO: Get from event context
-                                    evt_r_player: 0, // TODO: Get from event context
-                                };
-                                
+                            }
+                        } else {
+                            // No target function, automatically pass if effect exists
+                            println!("No target function, auto-passing: {}", effect_exists);
+                            effect_exists
+                        };
+                        
+                        if target_passed {
+                            // Both cost and target passed, finalize chain link and add to chain
+                            if let Some(chain_link) = data.current_chain_link.take() {
                                 data.chain.links.push(chain_link);
                                 
                                 // Remove the current AddChain unit first
@@ -815,26 +1106,33 @@ impl Duel {
                                 
                                 // Push SolveChain for auto-resolution
                                 data.processor_units.push_front(ProcessorUnit::solve_chain(0));
+                                
+                                ProcessResult::Continue
                             } else {
-                                // Continue without adding to chain
+                                // No current_chain_link, continue without adding to chain
+                                data.current_chain_link = None;
+                                data.processor_units.pop_front();
                                 data.processor_units.push_front(ProcessorUnit::phase_event(0, Phase::MAIN1.bits()));
+                                ProcessResult::Continue
                             }
                         } else {
-                            // Continue without adding to chain
+                            // Target failed or effect not found, clear current_chain_link and continue without adding to chain
+                            data.current_chain_link = None;
+                            data.processor_units.pop_front();
                             data.processor_units.push_front(ProcessorUnit::phase_event(0, Phase::MAIN1.bits()));
+                            ProcessResult::Continue
                         }
-                        
-                        ProcessResult::Continue
                     }
                     _ => {
-                        // Invalid step, pop unit and continue
+                        // Invalid step, clear current_chain_link, pop unit and continue
+                        data.current_chain_link = None;
                         data.processor_units.pop_front();
                         ProcessResult::Continue
                     }
                 }
             }
             ProcessorType::SolveChain => {
-                match unit.step {
+                match unit_step {
                     0 => {
                         // Step 0: Resolve the chain
                         
@@ -1015,6 +1313,8 @@ impl Duel {
 mod tests {
     use super::*;
     use crate::core::enums::Location;
+    use crate::core::enums::{CATEGORY_DESTROY, CATEGORY_TOHAND};
+    // use crate::core::enums::{CHAININFO_TRIGGERING_CATEGORY, CHAININFO_TARGET_COUNT};
     #[test]
     fn create_card_assigns_index_owner() {
         let mut d = Duel::new(42);
@@ -2075,5 +2375,159 @@ mod tests {
         
         // Test passed - the activation flow completed successfully
         println!("Activation flow test passed: cost → target → chain addition → operation execution");
+    }
+
+    #[test]
+    fn chain_info_exchange_set_get_operation_info() {
+        // Test the SetOperationInfo and GetChainInfo functionality
+        let mut duel = Duel::new(0);
+        
+        // Create a card to register effects on
+        let card_id = duel.create_card(1002, 0);
+        
+        // Register Lua script that uses SetOperationInfo in target function
+        // and GetChainInfo in operation function
+        let result = duel.lua.load(format!(r#"
+            local c = Card({})
+            local e = Effect.CreateEffect(c)
+            e:SetCode(1002)
+            e:SetType(EFFECT_TYPE_IGNITION)
+            e:SetProperty(EFFECT_FLAG_CARD_TARGET)
+            
+            -- Cost function
+            e:SetCost(function(e,tp,eg,ep,ev,re,r,rp)
+                return true
+            end)
+            
+            -- Target function that sets operation info
+            e:SetTarget(function(e,tp,eg,ep,ev,re,r,rp)
+                -- Set operation info using Duel.SetOperationInfo
+                -- Use hardcoded values since constants might not be loaded in test environment
+                Duel.SetOperationInfo(0, 0x1, nil, 1, tp, 0x8)  -- CATEGORY_DESTROY = 0x1, LOCATION_MZONE = 0x8
+                Duel.SetOperationInfo(0, 0x10000, nil, 2, tp, 0x10) -- CATEGORY_TOHAND = 0x10000, LOCATION_GRAVE = 0x10
+                return true
+            end)
+            
+            -- Operation function that retrieves chain info
+            e:SetOperation(function(e,tp,eg,ep,ev,re,r,rp)
+                print("Debug: Operation function called!")
+                -- Get chain info using Duel.GetChainInfo
+                local category = Duel.GetChainInfo(0, CHAININFO_TRIGGERING_CATEGORY)
+                local targets = Duel.GetChainInfo(0, CHAININFO_TARGET_CARDS)
+                local count = Duel.GetChainInfo(0, CHAININFO_TARGET_COUNT)
+                local param = Duel.GetChainInfo(0, CHAININFO_TARGET_PARAM)
+                local player = Duel.GetChainInfo(0, CHAININFO_TARGET_PLAYER)
+                
+                print("Debug: Retrieved category=", category, " count=", count, " param=", param, " player=", player)
+                
+                -- Store the retrieved info for verification
+                _G.test_category = category
+                _G.test_targets = targets
+                _G.test_count = count
+                _G.test_param = param
+                _G.test_player = player
+                
+                print("Debug: Stored values in global variables")
+                return nil
+            end)
+            
+            c:RegisterEffect(e)
+            return nil
+        "#, card_id.0)).exec();
+        
+        match result {
+            Ok(_) => {},
+            Err(e) => {
+                println!("Lua error: {:?}", e);
+                panic!("Lua script to register effect should run");
+            }
+        }
+        
+        // Find the effect ID we just registered
+        let effect_id = {
+            let data = duel.data.lock().unwrap();
+            println!("Registered effects: {:?}", data.effects.iter().map(|e| e.code).collect::<Vec<_>>());
+            data.effects.iter().position(|e| e.code == 1002)
+        };
+        assert!(effect_id.is_some(), "Effect should be registered");
+        let effect_id_value = effect_id.unwrap() as u32;
+        println!("Found effect ID: {}", effect_id_value);
+        
+        // Simulate the activation flow
+        {
+            let mut data = duel.data.lock().unwrap();
+            
+            // Push AddChain processor with the effect ID
+            data.processor_units.push_front(ProcessorUnit::new(
+                ProcessorType::AddChain, 
+                0, 
+                effect_id_value, 
+                0
+            ));
+            println!("Added AddChain processor with effect_id: {}", effect_id_value);
+        }
+        
+        // Process the activation flow - first step (cost execution)
+        let process_result = duel.process();
+        println!("Process result (step 0): {:?}", process_result);
+        assert_eq!(process_result, ProcessResult::Continue, "Processing should continue");
+        
+        // Process the activation flow - second step (target execution)
+        let process_result = duel.process();
+        println!("Process result (step 1): {:?}", process_result);
+        assert_eq!(process_result, ProcessResult::Continue, "Processing should continue");
+        
+        // Verify chain was properly formed with operation info
+        {
+            let data = duel.data.lock().unwrap();
+            println!("Chain links after processing: {}", data.chain.links.len());
+            assert!(!data.chain.links.is_empty(), "Chain should be created");
+            
+            let chain_link = &data.chain.links[0];
+            assert_eq!(chain_link.effect_id.0, effect_id_value, "Chain should contain our effect");
+            
+            // Verify operation info was set during target function execution
+            assert_eq!(chain_link.op_category, CATEGORY_DESTROY | CATEGORY_TOHAND, "Operation category should be set");
+            assert_eq!(chain_link.op_count, 2, "Target count should be set");
+            assert_eq!(chain_link.op_param, 0x10, "Target param should be set"); // LOCATION_GRAVE = 0x10
+            assert_eq!(chain_link.op_player, 0, "Target player should be set");
+        }
+        
+        // Now resolve the chain to execute the operation function
+        println!("Debug: Resolving chain...");
+        duel.resolve_chain();
+        println!("Debug: Chain resolved");
+        
+        // Verify that GetChainInfo retrieved the correct information
+        let result = duel.lua.load(r#"
+            return {
+                category = _G.test_category,
+                count = _G.test_count,
+                param = _G.test_param,
+                player = _G.test_player
+            }
+        "#).eval::<mlua::Table>();
+        
+        assert!(result.is_ok(), "Should be able to retrieve test results from Lua");
+        let test_results = result.unwrap();
+        
+        println!("Debug: test_results = {:?}", test_results);
+        
+        println!("Debug: category = {:?}", test_results.get::<_, Option<u32>>("category"));
+        println!("Debug: count = {:?}", test_results.get::<_, Option<u32>>("count"));
+        println!("Debug: param = {:?}", test_results.get::<_, Option<u32>>("param"));
+        println!("Debug: player = {:?}", test_results.get::<_, Option<u8>>("player"));
+        
+        let category: u32 = test_results.get("category").unwrap();
+        let count: u32 = test_results.get("count").unwrap();
+        let param: u32 = test_results.get("param").unwrap();
+        let player: u8 = test_results.get("player").unwrap();
+        
+        assert_eq!(category, CATEGORY_DESTROY | CATEGORY_TOHAND, "GetChainInfo should return correct category");
+        assert_eq!(count, 2, "GetChainInfo should return correct count");
+        assert_eq!(param, 0x10, "GetChainInfo should return correct param"); // LOCATION_GRAVE = 0x10
+        assert_eq!(player, 0, "GetChainInfo should return correct player");
+        
+        println!("Chain info exchange test passed: SetOperationInfo → GetChainInfo");
     }
 }

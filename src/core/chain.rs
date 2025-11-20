@@ -2,6 +2,7 @@
 use crate::core::types::EffectId;
 use crate::core::group::Group;
 
+#[derive(Clone)]
 pub struct ChainLink {
     pub effect_id: EffectId,
     pub trigger_player: u8,
@@ -15,6 +16,12 @@ pub struct ChainLink {
     pub evt_effect: Option<EffectId>,
     pub evt_reason: u32,
     pub evt_r_player: u8,
+    // Operation info fields (set by Duel.SetOperationInfo)
+    pub op_category: u32,
+    pub op_targets: Option<Group>,
+    pub op_count: u32,
+    pub op_param: u32,
+    pub op_player: u8,
 }
 
 pub struct Chain {
@@ -57,6 +64,11 @@ mod tests {
             evt_effect: None,
             evt_reason: 0,
             evt_r_player: 0,
+            op_category: 0,
+            op_targets: None,
+            op_count: 0,
+            op_param: 0,
+            op_player: 0,
         };
         let l2 = ChainLink { 
             effect_id: EffectId::new(2), 
@@ -71,6 +83,11 @@ mod tests {
             evt_effect: None,
             evt_reason: 0,
             evt_r_player: 0,
+            op_category: 0,
+            op_targets: None,
+            op_count: 0,
+            op_param: 0,
+            op_player: 0,
         };
         c.add(l1);
         c.add(l2);
